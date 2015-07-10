@@ -261,8 +261,6 @@ struct ceph_osd_request_head {
   }
 
   virtual void decode_payload() {
-
-    std::cout << "Kaczka - wersja: " << header.version << std::endl;
     p = payload.begin();
 
     if (header.version < 2) {
