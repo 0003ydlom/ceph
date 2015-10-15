@@ -33,11 +33,12 @@ void TestObjectStoreState::init(int colls, int objs)
 {
   dout(5) << "init " << colls << " colls " << objs << " objs" << dendl;
 
+  ObjectStore::Sequencer osr(__func__);
   ObjectStore::Transaction *t;
   t = new ObjectStore::Transaction;
 
-  t->create_collection(coll_t::meta());
-  m_store->apply_transaction(*t);
+  t->create_collection(coll_t::meta(), 0);
+  m_store->apply_transaction(&osr, *t);
 
   wait_for_ready();
 
@@ -49,7 +50,7 @@ void TestObjectStoreState::init(int colls, int objs)
         << " meta " << entry->m_meta_obj << dendl;
 
     t = new ObjectStore::Transaction;
-    t->create_collection(entry->m_coll);
+    t->create_collection(entry->m_coll, 32);
     bufferlist hint;
     uint32_t pg_num = colls;
     uint64_t num_objs = uint64_t(objs / colls);

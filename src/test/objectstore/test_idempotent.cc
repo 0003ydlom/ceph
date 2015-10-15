@@ -68,15 +68,16 @@ int main(int argc, char **argv) {
   boost::scoped_ptr<KeyValueDB> db(_db);
   boost::scoped_ptr<ObjectStore> store(new FileStore(store_path, store_dev));
 
-  coll_t coll(spg_t(pg_t(1,2),shard_id_t::NO_SHARD));
+  ObjectStore::Sequencer osr(__func__);
+  coll_t coll(spg_t(pg_t(0,12),shard_id_t::NO_SHARD));
 
   if (start_new) {
     std::cerr << "mkfs" << std::endl;
     assert(!store->mkfs());
     ObjectStore::Transaction t;
     assert(!store->mount());
-    t.create_collection(coll);
-    store->apply_transaction(t);
+    t.create_collection(coll, 0);
+    store->apply_transaction(&osr, t);
   } else {
     assert(!store->mount());
   }

@@ -134,6 +134,7 @@ int main(int argc, char **argv)
 
   FileStore fs(vm["filestore-path"].as<string>(),
 	       vm["journal-path"].as<string>());
+  ObjectStore::Sequencer osr(__func__);
 
   if (fs.mkfs() < 0) {
     cout << "mkfs failed" << std::endl;
@@ -171,13 +172,13 @@ int main(int argc, char **argv)
     spg_t pgid(pg_t(num, 0), shard_id_t::NO_SHARD);
     std::cout << "collection " << pgid << std::endl;
     ObjectStore::Transaction t;
-    t.create_collection(coll_t(pgid));
-    fs.apply_transaction(t);
+    t.create_collection(coll_t(pgid), 0);
+    fs.apply_transaction(&osr, t);
   }
   {
     ObjectStore::Transaction t;
-    t.create_collection(coll_t());
-    fs.apply_transaction(t);
+    t.create_collection(coll_t(), 0);
+    fs.apply_transaction(&osr, t);
   }
 
   vector<ceph::shared_ptr<Bencher> > benchers(

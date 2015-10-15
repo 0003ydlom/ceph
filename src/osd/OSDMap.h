@@ -340,7 +340,7 @@ public:
   }
 
   int get_flags() const { return flags; }
-  int test_flag(int f) const { return flags & f; }
+  bool test_flag(int f) const { return flags & f; }
   void set_flag(int f) { flags |= f; }
   void clear_flag(int f) { flags &= ~f; }
 
@@ -427,6 +427,10 @@ public:
 
   bool is_up(int osd) const {
     return exists(osd) && (osd_state[osd] & CEPH_OSD_UP);
+  }
+
+  bool has_been_up_since(int osd, epoch_t epoch) const {
+    return is_up(osd) && get_up_from(osd) <= epoch;
   }
 
   bool is_down(int osd) const {

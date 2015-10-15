@@ -260,7 +260,8 @@ enum {
   CEPH_OSD_RMW_FLAG_PGOP        = (1 << 5),
   CEPH_OSD_RMW_FLAG_CACHE       = (1 << 6),
   CEPH_OSD_RMW_FLAG_FORCE_PROMOTE   = (1 << 7),
-  CEPH_OSD_RMW_FLAG_SKIP_PROMOTE    = (1 << 8),
+  CEPH_OSD_RMW_FLAG_SKIP_HANDLE_CACHE = (1 << 8),
+  CEPH_OSD_RMW_FLAG_SKIP_PROMOTE      = (1 << 9),
 };
 
 
@@ -341,6 +342,10 @@ struct pg_t {
    *   ~((~0)<<b) & o.hash) == 0 iff o is in the pg for *this
    */
   unsigned get_split_bits(unsigned pg_num) const;
+
+  bool contains(int bits, const ghobject_t& oid) {
+    return oid.match(bits, ps());
+  }
 
   void encode(bufferlist& bl) const {
     __u8 v = 1;
@@ -528,7 +533,7 @@ public:
   }
 
   explicit coll_t(spg_t pgid)
-    : type(TYPE_PG), pgid(pgid)
+    : type(TYPE_PG), pgid(pgid), removal_seq(0)
   {
     calc_str();
   }
@@ -599,6 +604,11 @@ public:
   void decode(bufferlist::iterator& bl);
 
   inline bool operator==(const coll_t& rhs) const {
+    // only compare type if meta
+    if (type != rhs.type)
+      return false;
+    if (type == TYPE_META)
+      return true;
     return type == rhs.type && pgid == rhs.pgid;
   }
   inline bool operator!=(const coll_t& rhs) const {
@@ -912,6 +922,8 @@ struct pg_pool_t {
     FLAG_NOPGCHANGE = 1<<5, // pool's pg and pgp num can't be changed
     FLAG_NOSIZECHANGE = 1<<6, // pool's size and min size can't be changed
     FLAG_WRITE_FADVISE_DONTNEED = 1<<7, // write mode with LIBRADOS_OP_FLAG_FADVISE_DONTNEED
+    FLAG_NOSCRUB = 1<<8, // block periodic scrub
+    FLAG_NODEEP_SCRUB = 1<<9, // block periodic deep-scrub
   };
 
   static const char *get_flag_name(int f) {
@@ -924,6 +936,8 @@ struct pg_pool_t {
     case FLAG_NOPGCHANGE: return "nopgchange";
     case FLAG_NOSIZECHANGE: return "nosizechange";
     case FLAG_WRITE_FADVISE_DONTNEED: return "write_fadvise_dontneed";
+    case FLAG_NOSCRUB: return "noscrub";
+    case FLAG_NODEEP_SCRUB: return "nodeep-scrub";
     default: return "???";
     }
   }
@@ -958,6 +972,10 @@ struct pg_pool_t {
       return FLAG_NOSIZECHANGE;
     if (name == "write_fadvise_dontneed")
       return FLAG_WRITE_FADVISE_DONTNEED;
+    if (name == "noscrub")
+      return FLAG_NOSCRUB;
+    if (name == "nodeep-scrub")
+      return FLAG_NODEEP_SCRUB;
     return 0;
   }
 
@@ -1101,12 +1119,15 @@ public:
   HitSet::Params hit_set_params; ///< The HitSet params to use on this pool
   uint32_t hit_set_period;      ///< periodicity of HitSet segments (seconds)
   uint32_t hit_set_count;       ///< number of periods to retain
-  uint32_t min_read_recency_for_promote;   ///< minimum number of HitSet to check before promote
+  bool use_gmt_hitset;	        ///< use gmt to name the hitset archive object
+  uint32_t min_read_recency_for_promote;   ///< minimum number of HitSet to check before promote on read
+  uint32_t min_write_recency_for_promote;  ///< minimum number of HitSet to check before promote on write
 
   uint32_t stripe_width;        ///< erasure coded stripe size in bytes
 
   uint64_t expected_num_objects; ///< expected number of objects on this pool, a value of 0 indicates
                                  ///< user does not specify any expected value
+  bool fast_read;            ///< whether turn on fast read on the pool or not
 
   pg_pool_t()
     : flags(0), type(0), size(0), min_size(0),
@@ -1130,9 +1151,12 @@ public:
       hit_set_params(),
       hit_set_period(0),
       hit_set_count(0),
+      use_gmt_hitset(true),
       min_read_recency_for_promote(0),
+      min_write_recency_for_promote(0),
       stripe_width(0),
-      expected_num_objects(0)
+      expected_num_objects(0),
+      fast_read(false)
   { }
 
   void dump(Formatter *f) const;
@@ -1330,6 +1354,10 @@ struct object_stat_sum_t {
   int64_t num_evict;
   int64_t num_evict_kb;
   int64_t num_promote;
+  int32_t num_flush_mode_high;  // 1 when in high flush mode, otherwise 0
+  int32_t num_flush_mode_low;   // 1 when in low flush mode, otherwise 0
+  int32_t num_evict_mode_some;  // 1 when in evict some mode, otherwise 0
+  int32_t num_evict_mode_full;  // 1 when in evict full mode, otherwise 0
 
   object_stat_sum_t()
     : num_bytes(0),
@@ -1352,7 +1380,9 @@ struct object_stat_sum_t {
       num_flush_kb(0),
       num_evict(0),
       num_evict_kb(0),
-      num_promote(0)
+      num_promote(0),
+      num_flush_mode_high(0), num_flush_mode_low(0),
+      num_evict_mode_some(0), num_evict_mode_full(0)
   {}
 
   void floor(int64_t f) {
@@ -1385,6 +1415,10 @@ struct object_stat_sum_t {
     FLOOR(num_evict);
     FLOOR(num_evict_kb);
     FLOOR(num_promote);
+    FLOOR(num_flush_mode_high);
+    FLOOR(num_flush_mode_low);
+    FLOOR(num_evict_mode_some);
+    FLOOR(num_evict_mode_full);
 #undef FLOOR
   }
 
@@ -1425,6 +1459,10 @@ struct object_stat_sum_t {
     SPLIT(num_evict);
     SPLIT(num_evict_kb);
     SPLIT(num_promote);
+    SPLIT(num_flush_mode_high);
+    SPLIT(num_flush_mode_low);
+    SPLIT(num_evict_mode_some);
+    SPLIT(num_evict_mode_full);
 #undef SPLIT
   }
 
@@ -1691,10 +1729,9 @@ WRITE_CLASS_ENCODER_FEATURES(pool_stat_t)
 struct pg_hit_set_info_t {
   utime_t begin, end;   ///< time interval
   eversion_t version;   ///< version this HitSet object was written
-
-  pg_hit_set_info_t() {}
-  pg_hit_set_info_t(utime_t b)
-    : begin(b) {}
+  bool using_gmt;	///< use gmt for creating the hit_set archive object name
+  pg_hit_set_info_t(bool using_gmt = true)
+    : using_gmt(using_gmt) {}
 
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator &bl);
@@ -1711,8 +1748,6 @@ WRITE_CLASS_ENCODER(pg_hit_set_info_t)
  */
 struct pg_hit_set_history_t {
   eversion_t current_last_update;  ///< last version inserted into current set
-  utime_t current_last_stamp;      ///< timestamp of last insert
-  pg_hit_set_info_t current_info;  ///< metadata about the current set
   list<pg_hit_set_info_t> history; ///< archived sets, sorted oldest -> newest
 
   void encode(bufferlist &bl) const;
@@ -1736,6 +1771,7 @@ struct pg_history_t {
   epoch_t last_epoch_started;  // lower bound on last epoch started (anywhere, not necessarily locally)
   epoch_t last_epoch_clean;    // lower bound on last epoch the PG was completely clean.
   epoch_t last_epoch_split;    // as parent
+  epoch_t last_epoch_marked_full;  // pool or cluster
   
   /**
    * In the event of a map discontinuity, same_*_since may reflect the first
@@ -1757,6 +1793,7 @@ struct pg_history_t {
   pg_history_t()
     : epoch_created(0),
       last_epoch_started(0), last_epoch_clean(0), last_epoch_split(0),
+      last_epoch_marked_full(0),
       same_up_since(0), same_interval_since(0), same_primary_since(0) {}
   
   bool merge(const pg_history_t &other) {
@@ -1776,6 +1813,10 @@ struct pg_history_t {
     }
     if (last_epoch_split < other.last_epoch_split) {
       last_epoch_split = other.last_epoch_split; 
+      modified = true;
+    }
+    if (last_epoch_marked_full < other.last_epoch_marked_full) {
+      last_epoch_marked_full = other.last_epoch_marked_full;
       modified = true;
     }
     if (other.last_scrub > last_scrub) {
@@ -1810,7 +1851,8 @@ WRITE_CLASS_ENCODER(pg_history_t)
 
 inline ostream& operator<<(ostream& out, const pg_history_t& h) {
   return out << "ec=" << h.epoch_created
-	     << " les/c " << h.last_epoch_started << "/" << h.last_epoch_clean
+	     << " les/c/f " << h.last_epoch_started << "/" << h.last_epoch_clean
+	     << "/" << h.last_epoch_marked_full
 	     << " " << h.same_up_since << "/" << h.same_interval_since << "/" << h.same_primary_since;
 }
 
@@ -1826,15 +1868,16 @@ inline ostream& operator<<(ostream& out, const pg_history_t& h) {
  */
 struct pg_info_t {
   spg_t pgid;
-  eversion_t last_update;    // last object version applied to store.
-  eversion_t last_complete;  // last version pg was complete through.
-  epoch_t last_epoch_started;// last epoch at which this pg started on this osd
+  eversion_t last_update;      ///< last object version applied to store.
+  eversion_t last_complete;    ///< last version pg was complete through.
+  epoch_t last_epoch_started;  ///< last epoch at which this pg started on this osd
   
-  version_t last_user_version; // last user object version applied to store
+  version_t last_user_version; ///< last user object version applied to store
 
-  eversion_t log_tail;     // oldest log entry.
+  eversion_t log_tail;         ///< oldest log entry.
 
-  hobject_t last_backfill;   // objects >= this and < last_complete may be missing
+  hobject_t last_backfill;     ///< objects >= this and < last_complete may be missing
+  bool last_backfill_bitwise;  ///< true if last_backfill reflects a bitwise (vs nibblewise) sort
 
   interval_set<snapid_t> purged_snaps;
 
@@ -1845,14 +1888,21 @@ struct pg_info_t {
 
   pg_info_t()
     : last_epoch_started(0), last_user_version(0),
-      last_backfill(hobject_t::get_max())
+      last_backfill(hobject_t::get_max()),
+      last_backfill_bitwise(false)
   { }
   pg_info_t(spg_t p)
     : pgid(p),
       last_epoch_started(0), last_user_version(0),
-      last_backfill(hobject_t::get_max())
+      last_backfill(hobject_t::get_max()),
+      last_backfill_bitwise(false)
   { }
   
+  void set_last_backfill(hobject_t pos, bool sort) {
+    last_backfill = pos;
+    last_backfill_bitwise = sort;
+  }
+
   bool is_empty() const { return last_update.version == 0; }
   bool dne() const { return history.epoch_created == 0; }
 
@@ -1884,7 +1934,8 @@ inline ostream& operator<<(ostream& out, const pg_info_t& pgi)
     out << " (" << pgi.log_tail << "," << pgi.last_update << "]";
   }
   if (pgi.is_incomplete())
-    out << " lb " << pgi.last_backfill;
+    out << " lb " << pgi.last_backfill
+	<< (pgi.last_backfill_bitwise ? " (bitwise)" : " (NIBBLEWISE)");
   //out << " c " << pgi.epoch_created;
   out << " local-les=" << pgi.last_epoch_started;
   out << " n=" << pgi.stats.stats.sum.num_objects;
@@ -1963,6 +2014,8 @@ struct pg_interval_t {
     int new_min_size,
     unsigned old_pg_num,
     unsigned new_pg_num,
+    bool old_sort_bitwise,
+    bool new_sort_bitwise,
     pg_t pgid
     );
 
@@ -2482,7 +2535,7 @@ struct pg_missing_t {
   }; 
   WRITE_CLASS_ENCODER(item)
 
-  map<hobject_t, item> missing;         // oid -> (need v, have v)
+  map<hobject_t, item, hobject_t::ComparatorWithDefault> missing;  // oid -> (need v, have v)
   map<version_t, hobject_t> rmissing;  // v -> oid
 
   unsigned int num_missing() const;
@@ -2496,15 +2549,17 @@ struct pg_missing_t {
   void revise_have(hobject_t oid, eversion_t have);
   void add(const hobject_t& oid, eversion_t need, eversion_t have);
   void rm(const hobject_t& oid, eversion_t v);
-  void rm(const std::map<hobject_t, pg_missing_t::item>::iterator &m);
+  void rm(const std::map<hobject_t, pg_missing_t::item, hobject_t::ComparatorWithDefault>::iterator &m);
   void got(const hobject_t& oid, eversion_t v);
-  void got(const std::map<hobject_t, pg_missing_t::item>::iterator &m);
+  void got(const std::map<hobject_t, pg_missing_t::item, hobject_t::ComparatorWithDefault>::iterator &m);
   void split_into(pg_t child_pgid, unsigned split_bits, pg_missing_t *omissing);
 
   void clear() {
     missing.clear();
     rmissing.clear();
   }
+
+  void resort(bool sort_bitwise);
 
   void encode(bufferlist &bl) const;
   void decode(bufferlist::iterator &bl, int64_t pool = -1);
@@ -2697,9 +2752,15 @@ struct object_copy_data_t {
   ///< recent reqids on this object
   vector<pair<osd_reqid_t, version_t> > reqids;
 
+  uint64_t truncate_seq;
+  uint64_t truncate_size;
+
 public:
-  object_copy_data_t() : size((uint64_t)-1), data_digest(-1),
-			 omap_digest(-1), flags(0) {}
+  object_copy_data_t() :
+    size((uint64_t)-1), data_digest(-1),
+    omap_digest(-1), flags(0),
+    truncate_seq(0),
+    truncate_size(0) {}
 
   static void generate_test_instances(list<object_copy_data_t*>& o);
   void encode_classic(bufferlist& bl) const;
@@ -2795,12 +2856,11 @@ public:
   // last interval over which i mounted and was then active
   epoch_t mounted;     // last epoch i mounted
   epoch_t clean_thru;  // epoch i was active and clean thru
-  epoch_t last_map_marked_full; // last epoch osdmap was marked full
 
   OSDSuperblock() : 
     whoami(-1), 
     current_epoch(0), oldest_map(0), newest_map(0), weight(0),
-    mounted(0), clean_thru(0), last_map_marked_full(0) {
+    mounted(0), clean_thru(0) {
   }
 
   void encode(bufferlist &bl) const;
@@ -2921,12 +2981,15 @@ static inline ostream& operator<<(ostream& out, const watch_info_t& w) {
 
 struct notify_info_t {
   uint64_t cookie;
+  uint64_t notify_id;
   uint32_t timeout;
   bufferlist bl;
 };
 
 static inline ostream& operator<<(ostream& out, const notify_info_t& n) {
-  return out << "notify(cookie " << n.cookie << " " << n.timeout << "s)";
+  return out << "notify(cookie " << n.cookie
+	     << " notify" << n.notify_id
+	     << " " << n.timeout << "s)";
 }
 
 
@@ -2979,7 +3042,6 @@ struct object_info_t {
     return get_flag_string(flags);
   }
 
-  osd_reqid_t wrlock_by;   // [head]
   vector<snapid_t> snaps;  // [clone]
 
   uint64_t truncate_seq, truncate_size;
@@ -3480,7 +3542,7 @@ struct ObjectRecoveryInfo {
   object_info_t oi;
   SnapSet ss;
   interval_set<uint64_t> copy_subset;
-  map<hobject_t, interval_set<uint64_t> > clone_subset;
+  map<hobject_t, interval_set<uint64_t>, hobject_t::BitwiseComparator> clone_subset;
 
   ObjectRecoveryInfo() : size(0) { }
 
@@ -3606,7 +3668,7 @@ struct ScrubMap {
   };
   WRITE_CLASS_ENCODER(object)
 
-  map<hobject_t,object> objects;
+  map<hobject_t,object, hobject_t::BitwiseComparator> objects;
   eversion_t valid_through;
   eversion_t incr_since;
 

@@ -7,6 +7,7 @@ if ENABLE_SERVER
 
 libos_la_SOURCES = \
 	os/chain_xattr.cc \
+	os/fs/FS.cc \
 	os/DBObjectMap.cc \
 	os/GenericObjectMap.cc \
 	os/FileJournal.cc \
@@ -28,8 +29,15 @@ if LINUX
 libos_la_SOURCES += os/BtrfsFileStoreBackend.cc
 endif
 
+if WITH_LIBAIO
+libos_types_la_SOURCES += os/newstore/newstore_types.cc
+libos_la_SOURCES += os/newstore/NewStore.cc
+endif
+
 if WITH_LIBXFS
-libos_la_SOURCES += os/XfsFileStoreBackend.cc
+libos_la_SOURCES += \
+    os/fs/XFS.cc \
+    os/XfsFileStoreBackend.cc
 endif
 
 if WITH_LIBZFS
@@ -47,6 +55,8 @@ noinst_LTLIBRARIES += libos.la
 noinst_HEADERS += \
 	os/btrfs_ioctl.h \
 	os/chain_xattr.h \
+	os/newstore/newstore_types.h \
+	os/newstore/NewStore.h \
 	os/BtrfsFileStoreBackend.h \
 	os/CollectionIndex.h \
 	os/DBObjectMap.h \
@@ -54,6 +64,8 @@ noinst_HEADERS += \
 	os/FileJournal.h \
 	os/FileStore.h \
 	os/FDCache.h \
+	os/fs/FS.h \
+	os/fs/XFS.h \
 	os/GenericFileStoreBackend.h \
 	os/HashIndex.h \
 	os/IndexManager.h \
@@ -66,6 +78,7 @@ noinst_HEADERS += \
 	os/KeyValueStore.h \
 	os/ObjectMap.h \
 	os/ObjectStore.h \
+	os/PageSet.h \
 	os/SequencerPosition.h \
 	os/WBThrottle.h \
 	os/XfsFileStoreBackend.h \

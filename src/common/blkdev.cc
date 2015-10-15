@@ -19,10 +19,10 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include "include/int_types.h"
+#include "include/uuid.h"
 
 #ifdef __linux__
 #include <linux/fs.h>
-#include "include/uuid.h"
 #include <blkid/blkid.h>
 
 #define UUID_LEN 36
@@ -187,7 +187,7 @@ int get_device_by_uuid(uuid_d dev_uuid, const char* label, char* partition,
   blkid_dev dev = NULL;
   int rc = 0;
 
-  uuid_unparse((const unsigned char*)&dev_uuid.uuid, uuid_str);
+  dev_uuid.print(uuid_str);
 
   if (blkid_get_cache(&cache, NULL) >= 0)
     dev = blkid_find_dev_with_tag(cache, label, (const char*)uuid_str);

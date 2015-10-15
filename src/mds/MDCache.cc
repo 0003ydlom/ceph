@@ -6290,7 +6290,7 @@ bool MDCache::trim(int max, int count)
     CDir *subtree = *s;
     if (subtree->inode->is_mdsdir()) {
       mds_rank_t owner = mds_rank_t(MDS_INO_MDSDIR_OWNER(subtree->inode->ino()));
-      if (owner == mds->get_nodeid()) {
+      if (owner == mds->get_nodeid() || !mds->mdsmap->is_up(owner)) {
         continue;
       }
 
@@ -8167,7 +8167,7 @@ void MDCache::_open_ino_parent_opened(inodeno_t ino, int ret)
     _open_ino_traverse_dir(ino, info, 0);
   } else {
     if (ret >= 0) {
-      mds_rank_t checked_rank;
+      mds_rank_t checked_rank = mds_rank_t(ret);
       info.check_peers = true;
       info.auth_hint = checked_rank;
       info.checked.erase(checked_rank);

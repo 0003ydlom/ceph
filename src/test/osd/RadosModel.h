@@ -473,6 +473,13 @@ public:
     return false;
   }
 
+  bool object_existed_at(const string &oid, int snap = -1) const
+  {
+    ObjectDesc contents;
+    bool found = find_object(oid, &contents, snap);
+    return found && contents.exists;
+  }
+
   void remove_snap(int snap)
   {
     map<int, map<string,ObjectDesc> >::iterator next_iter = pool_obj_cont.find(snap);
@@ -985,6 +992,8 @@ public:
 
   vector<bufferlist> results;
   vector<int> retvals;
+  vector<std::map<uint64_t, uint64_t>> extent_results;
+  vector<bool> is_sparse_read;
   uint64_t waiting_on;
 
   map<string, bufferlist> attrs;
@@ -1009,10 +1018,32 @@ public:
       balance_reads(balance_reads),
       results(3),
       retvals(3),
+      extent_results(3),
+      is_sparse_read(3, false),
       waiting_on(0),
       attrretval(0)
   {}
-		
+
+  void _do_read(librados::ObjectReadOperation& read_op, int index) {
+    uint64_t len = 0;
+    if (old_value.has_contents())
+      len = old_value.most_recent_gen()->get_length(old_value.most_recent());
+    if (rand() % 2) {
+      is_sparse_read[index] = false;
+      read_op.read(0,
+		   len,
+		   &results[index],
+		   &retvals[index]);
+    } else {
+      is_sparse_read[index] = true;
+      read_op.sparse_read(0,
+			  len,
+			  &extent_results[index],
+			  &results[index],
+			  &retvals[index]);
+    }
+  }
+
   void _begin()
   {
     context->state_lock.Lock();
@@ -1058,13 +1089,7 @@ public:
     if (snap >= 0) {
       context->io_ctx.snap_set_read(context->snaps[snap]);
     }
-
-    op.read(0,
-	    !old_value.has_contents() ? 0 :
-	    old_value.most_recent_gen()->get_length(old_value.most_recent()),
-	    &results[0],
-	    &retvals[0]);
-
+    _do_read(op, 0);
     for (map<string, ContDesc>::iterator i = old_value.attrs.begin();
 	 i != old_value.attrs.end();
 	 ++i) {
@@ -1096,12 +1121,7 @@ public:
     // OSD's read behavior in some scenarios
     for (uint32_t i = 1; i < 3; ++i) {
       librados::ObjectReadOperation pipeline_op;
-
-      pipeline_op.read(0,
-                       !old_value.has_contents() ? 0 :
-                       old_value.most_recent_gen()->get_length(old_value.most_recent()),
-                       &results[i],
-                       &retvals[i]);
+      _do_read(pipeline_op, i);
       assert(!context->io_ctx.aio_operate(context->prefix+oid, completions[i], &pipeline_op, 0));
       waiting_on++;
     }
@@ -1175,11 +1195,17 @@ public:
 	       << ", expected " << old_value.most_recent() << std::endl;
 	  context->errors++;
 	}
-        for (vector<bufferlist>::iterator it = results.begin();
-             it != results.end(); ++it) {
-	  if (!old_value.check(*it)) {
-	    cerr << num << ": oid " << oid << " contents " << to_check << " corrupt" << std::endl;
-	    context->errors++;
+        for (unsigned i = 0; i < results.size(); i++) {
+	  if (is_sparse_read[i]) {
+	    if (!old_value.check_sparse(extent_results[i], results[i])) {
+	      cerr << num << ": oid " << oid << " contents " << to_check << " corrupt" << std::endl;
+	      context->errors++;
+	    }
+	  } else {
+	    if (!old_value.check(results[i])) {
+	      cerr << num << ": oid " << oid << " contents " << to_check << " corrupt" << std::endl;
+	      context->errors++;
+	    }
 	  }
 	}
 	if (context->errors) assert(0);
@@ -1449,9 +1475,13 @@ public:
   string oid;
   int roll_back_to;
   bool done;
+  librados::ObjectWriteOperation zero_write_op1;
+  librados::ObjectWriteOperation zero_write_op2;
   librados::ObjectWriteOperation op;
-  librados::AioCompletion *comp;
+  vector<librados::AioCompletion *> comps;
   ceph::shared_ptr<int> in_use;
+  int last_finished;
+  int outstanding;
 
   RollbackOp(int n,
 	     RadosTestContext *context,
@@ -1459,7 +1489,9 @@ public:
 	     TestOpStat *stat = 0)
     : TestOp(n, context, stat),
       oid(_oid), roll_back_to(-1), 
-      done(false), comp(NULL)
+      done(false),
+      comps(3, NULL),
+      last_finished(-1), outstanding(3)
   {}
 
   void _begin()
@@ -1489,10 +1521,19 @@ public:
 
     cout << "rollback oid " << oid << " to " << roll_back_to << std::endl;
 
+    bool existed_before = context->object_existed_at(oid);
+    bool existed_after = context->object_existed_at(oid, roll_back_to);
+
     context->roll_back(oid, roll_back_to);
     uint64_t snap = context->snaps[roll_back_to];
 
+    outstanding -= (!existed_before) + (!existed_after);
+
     context->state_lock.Unlock();
+
+    bufferlist bl, bl2;
+    zero_write_op1.append(bl);
+    zero_write_op2.append(bl2);
 
     if (context->pool_snaps) {
       op.snap_rollback(snap);
@@ -1500,28 +1541,60 @@ public:
       op.selfmanaged_snap_rollback(snap);
     }
 
-    pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
-      new pair<TestOp*, TestOp::CallbackInfo*>(this,
-					       new TestOp::CallbackInfo(0));
-    comp = context->rados.aio_create_completion((void*) cb_arg, NULL,
-						&write_callback);
-    context->io_ctx.aio_operate(context->prefix+oid, comp, &op);
+    if (existed_before) {
+      pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
+	new pair<TestOp*, TestOp::CallbackInfo*>(this,
+						 new TestOp::CallbackInfo(0));
+      comps[0] = 
+	context->rados.aio_create_completion((void*) cb_arg, NULL,
+					     &write_callback);
+      context->io_ctx.aio_operate(
+	context->prefix+oid, comps[0], &zero_write_op1);
+    }
+    {
+      pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
+	new pair<TestOp*, TestOp::CallbackInfo*>(this,
+						 new TestOp::CallbackInfo(1));
+      comps[1] =
+	context->rados.aio_create_completion((void*) cb_arg, NULL,
+					     &write_callback);
+      context->io_ctx.aio_operate(
+	context->prefix+oid, comps[1], &op);
+    }
+    if (existed_after) {
+      pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
+	new pair<TestOp*, TestOp::CallbackInfo*>(this,
+						 new TestOp::CallbackInfo(2));
+      comps[2] =
+	context->rados.aio_create_completion((void*) cb_arg, NULL,
+					     &write_callback);
+      context->io_ctx.aio_operate(
+	context->prefix+oid, comps[2], &zero_write_op2);
+    }
   }
 
   void _finish(CallbackInfo *info)
   {
     Mutex::Locker l(context->state_lock);
+    uint64_t tid = info->id;
+    cout << num << ":  finishing rollback tid " << tid
+	 << " to " << context->prefix + oid << std::endl;
+    assert((int)(info->id) > last_finished);
+    last_finished = info->id;
+
     int r;
-    if ((r = comp->get_return_value())) {
+    if ((r = comps[last_finished]->get_return_value()) != 0) {
       cerr << "err " << r << std::endl;
       assert(0);
     }
-    done = true;
-    context->update_object_version(oid, comp->get_version64());
-    context->oid_in_use.erase(oid);
-    context->oid_not_in_use.insert(oid);
-    in_use = ceph::shared_ptr<int>();
-    context->kick();
+    if (--outstanding == 0) {
+      done = true;
+      context->update_object_version(oid, comps[tid]->get_version64());
+      context->oid_in_use.erase(oid);
+      context->oid_not_in_use.insert(oid);
+      in_use = ceph::shared_ptr<int>();
+      context->kick();
+    }
   }
 
   bool finished()

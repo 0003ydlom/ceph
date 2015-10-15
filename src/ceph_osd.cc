@@ -15,7 +15,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <uuid/uuid.h>
 #include <boost/scoped_ptr.hpp>
 
 #include <iostream>
@@ -84,12 +83,12 @@ void usage()
 
 int preload_erasure_code()
 {
-  string directory = g_conf->osd_pool_default_erasure_code_directory;
   string plugins = g_conf->osd_erasure_code_plugins;
   stringstream ss;
-  int r = ErasureCodePluginRegistry::instance().preload(plugins,
-							directory,
-							&ss);
+  int r = ErasureCodePluginRegistry::instance().preload(
+    plugins,
+    g_conf->erasure_code_dir,
+    &ss);
   if (r)
     derr << ss.str() << dendl;
   else
@@ -316,7 +315,6 @@ int main(int argc, const char **argv)
 	   << ": " << cpp_strerror(-err) << TEXT_NORMAL << dendl;
       exit(1);
     }
-    store->sync_and_flush();
     store->umount();
     derr << "flushed journal " << g_conf->osd_journal
 	 << " for object store " << g_conf->osd_data

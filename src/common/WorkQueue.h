@@ -322,6 +322,10 @@ public:
       pool->_lock.Unlock();
     }
 
+    Mutex &get_lock() {
+      return pool->_lock;
+    }
+
     void lock() {
       pool->lock();
     }
@@ -335,6 +339,9 @@ public:
     /// wake up the thread pool (with lock already held)
     void _wake() {
       pool->_wake();
+    }
+    void _wait() {
+      pool->_wait();
     }
     void drain() {
       pool->drain(this);
@@ -414,6 +421,9 @@ public:
   void wake() {
     Mutex::Locker l(_lock);
     _cond.Signal();
+  }
+  void _wait() {
+    _cond.Wait(_lock);
   }
 
   /// start thread pool thread

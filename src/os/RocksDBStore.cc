@@ -73,7 +73,7 @@ int RocksDBStore::tryInterpret(const string key, const string val, rocksdb::Opti
 int RocksDBStore::ParseOptionsFromString(const string opt_str, rocksdb::Options &opt)
 {
   map<string, string> str_map;
-  int r = get_str_map(opt_str, "\n;", &str_map);
+  int r = get_str_map(opt_str, ",\n;", &str_map);
   if (r < 0)
     return r;
   map<string, string>::iterator it;
@@ -88,6 +88,8 @@ int RocksDBStore::ParseOptionsFromString(const string opt_str, rocksdb::Options 
 	return -EINVAL;
       }
     }
+    lgeneric_dout(cct, 0) << " set rocksdb option " << it->first
+			  << " = " << it->second << dendl;
   }
   return 0;
 }
@@ -248,8 +250,7 @@ void RocksDBStore::RocksDBTransactionImpl::set(
 void RocksDBStore::RocksDBTransactionImpl::rmkey(const string &prefix,
 					         const string &k)
 {
-  string key = combine_strings(prefix, k);
-  bat->Delete(rocksdb::Slice(k));
+  bat->Delete(combine_strings(prefix, k));
 }
 
 void RocksDBStore::RocksDBTransactionImpl::rmkeys_by_prefix(const string &prefix)
@@ -258,8 +259,7 @@ void RocksDBStore::RocksDBTransactionImpl::rmkeys_by_prefix(const string &prefix
   for (it->seek_to_first();
        it->valid();
        it->next()) {
-    string key = combine_strings(prefix, it->key());
-    bat->Delete(key);
+    bat->Delete(combine_strings(prefix, it->key()));
   }
 }
 

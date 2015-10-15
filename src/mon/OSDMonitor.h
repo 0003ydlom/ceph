@@ -26,6 +26,7 @@
 using namespace std;
 
 #include "include/types.h"
+#include "common/simple_cache.hpp"
 #include "msg/Messenger.h"
 
 #include "osd/OSDMap.h"
@@ -136,13 +137,8 @@ private:
 
   map<int,double> osd_weight;
 
-  /*
-   * cache what epochs we think osds have.  this is purely
-   * optimization to try to avoid sending the same inc maps twice.
-   */
-  map<int,epoch_t> osd_epoch;
-
-  void note_osd_has_epoch(int osd, epoch_t epoch);
+  SimpleLRU<version_t, bufferlist> inc_osd_cache;
+  SimpleLRU<version_t, bufferlist> full_osd_cache;
 
   void check_failures(utime_t now);
   bool check_failure(utime_t now, int target_osd, failure_info_t& fi);
@@ -156,6 +152,12 @@ private:
   CrushWrapper &_get_stable_crush();
   void _get_pending_crush(CrushWrapper& newcrush);
 
+  enum FastReadType {
+    FAST_READ_OFF,
+    FAST_READ_ON,
+    FAST_READ_DEFAULT
+  };
+
   // svc
 public:  
   void create_initial();
@@ -165,7 +167,6 @@ private:
   void encode_pending(MonitorDBStore::TransactionRef t);
   void on_active();
   void on_shutdown();
-
   /**
    * we haven't delegated full version stashing to paxosservice for some time
    * now, making this function useless in current context.
@@ -226,7 +227,10 @@ private:
   MOSDMap *build_incremental(epoch_t first, epoch_t last);
   void send_full(MonOpRequestRef op);
   void send_incremental(MonOpRequestRef op, epoch_t first);
-  void send_incremental(epoch_t first, MonSession *session, bool onetime);
+  // @param req an optional op request, if the osdmaps are replies to it. so
+  //            @c Monitor::send_reply() can mark_event with it.
+  void send_incremental(epoch_t first, MonSession *session, bool onetime,
+			MonOpRequestRef req = MonOpRequestRef());
 
   int reweight_by_utilization(int oload, std::string& out_str, bool by_pg,
 			      const set<int64_t> *pools);
@@ -314,6 +318,7 @@ private:
 		       const string &erasure_code_profile,
                        const unsigned pool_type,
                        const uint64_t expected_num_objects,
+                       FastReadType fast_read,
 		       ostream *ss);
   int prepare_new_pool(MonOpRequestRef op);
 
@@ -392,11 +397,7 @@ private:
   int load_metadata(int osd, map<string, string>& m, ostream *err);
 
  public:
-  OSDMonitor(CephContext *cct, Monitor *mn, Paxos *p, string service_name)
-  : PaxosService(mn, p, service_name),
-    thrash_map(0), thrash_last_up_osd(-1),
-    op_tracker(cct, true, 1)
-  { }
+  OSDMonitor(CephContext *cct, Monitor *mn, Paxos *p, const string& service_name);
 
   void tick();  // check state, take actions
 
@@ -421,6 +422,9 @@ private:
     op->mark_osdmon_event(__func__);
     send_incremental(op, start);
   }
+
+  int get_version(version_t ver, bufferlist& bl) override;
+  int get_version_full(version_t ver, bufferlist& bl) override;
 
   epoch_t blacklist(const entity_addr_t& a, utime_t until);
 

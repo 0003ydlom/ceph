@@ -141,7 +141,10 @@ private:
   int init_index(coll_t c);
 
   void _kludge_temp_object_collection(coll_t& cid, const ghobject_t& oid) {
-    if (oid.hobj.pool < -1 && !cid.is_temp())
+    // - normal temp case: cid is pg, object is temp (pool < -1)
+    // - hammer temp case: cid is pg (or already temp), object pool is -1
+    if (cid.is_pg() && (oid.hobj.pool < -1 ||
+			oid.hobj.pool == -1))
       cid = cid.get_temp();
   }
   void init_temp_collections();
@@ -263,6 +266,7 @@ private:
       q.push_back(o);
     }
     Op *peek_queue() {
+      Mutex::Locker l(qlock);
       assert(apply_lock.is_locked());
       return q.front();
     }
@@ -304,7 +308,6 @@ private:
       Mutex::Locker l(qlock);
       uint64_t seq = 0;
       if (_get_max_uncompleted(&seq)) {
-	delete c;
 	return true;
       } else {
 	flush_commit_waiters.push_back(make_pair(seq, c));
@@ -330,7 +333,6 @@ private:
   FDCache fdcache;
   WBThrottle wbthrottle;
 
-  Sequencer default_osr;
   deque<OpSequencer*> op_queue;
   Throttle throttle_ops, throttle_bytes;
   Finisher op_finisher;
@@ -458,6 +460,10 @@ public:
    */
   bool get_allow_sharded_objects();
 
+  bool can_sort_nibblewise() {
+    return true;    // i support legacy sort order
+  }
+
   void collect_metadata(map<string,string> *pm);
 
   int statfs(struct statfs *buf);
@@ -569,11 +575,11 @@ public:
   void do_force_sync();
   void start_sync(Context *onsafe);
   void sync();
-  using JournalingObjectStore::sync;
   void _flush_op_queue();
   void flush();
   void sync_and_flush();
 
+  int flush_journal();
   int dump_journal(ostream& out);
 
   void set_fsid(uuid_d u) {
@@ -583,8 +589,8 @@ public:
 
   // DEBUG read error injection, an object is removed from both on delete()
   Mutex read_error_lock;
-  set<ghobject_t> data_error_set; // read() will return -EIO
-  set<ghobject_t> mdata_error_set; // getattr(),stat() will return -EIO
+  set<ghobject_t, ghobject_t::BitwiseComparator> data_error_set; // read() will return -EIO
+  set<ghobject_t, ghobject_t::BitwiseComparator> mdata_error_set; // getattr(),stat() will return -EIO
   void inject_data_error(const ghobject_t &oid);
   void inject_mdata_error(const ghobject_t &oid);
   void debug_obj_on_delete(const ghobject_t &oid);
@@ -604,18 +610,12 @@ public:
   int _rmattrs(coll_t cid, const ghobject_t& oid,
 	       const SequencerPosition &spos);
 
-  int collection_getattr(coll_t c, const char *name, void *value, size_t size);
-  int collection_getattr(coll_t c, const char *name, bufferlist& bl);
-  int collection_getattrs(coll_t cid, map<string,bufferptr> &aset);
-
-  int _collection_setattr(coll_t c, const char *name, const void *value, size_t size);
-  int _collection_rmattr(coll_t c, const char *name);
-  int _collection_setattrs(coll_t cid, map<string,bufferptr> &aset);
   int _collection_remove_recursive(const coll_t &cid,
 				   const SequencerPosition &spos);
 
   // collections
-  int collection_list(coll_t c, ghobject_t start, ghobject_t end, int max,
+  int collection_list(coll_t c, ghobject_t start, ghobject_t end,
+		      bool sort_bitwise, int max,
 		      vector<ghobject_t> *ls, ghobject_t *next);
   int list_collections(vector<coll_t>& ls);
   int list_collections(vector<coll_t>& ls, bool include_temp);

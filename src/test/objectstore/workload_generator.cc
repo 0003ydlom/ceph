@@ -353,7 +353,8 @@ void WorkloadGenerator::do_destroy_collection(ObjectStore::Transaction *t,
   m_nr_runs.set(0);
   entry->m_osr.flush();
   vector<ghobject_t> ls;
-  m_store->collection_list(entry->m_coll, ghobject_t(), ghobject_t::get_max(), INT_MAX, &ls, NULL);
+  m_store->collection_list(entry->m_coll, ghobject_t(), ghobject_t::get_max(),
+			   true, INT_MAX, &ls, NULL);
   dout(2) << __func__ << " coll " << entry->m_coll
       << " (" << ls.size() << " objects)" << dendl;
 
@@ -378,7 +379,7 @@ TestObjectStoreState::coll_entry_t
   m_collections.insert(make_pair(entry->m_id, entry));
 
   dout(2) << __func__ << " id " << entry->m_id << " coll " << entry->m_coll << dendl;
-  t->create_collection(entry->m_coll);
+  t->create_collection(entry->m_coll, 32);
   dout(2) << __func__ << " meta " << coll_t::meta() << "/" << entry->m_meta_obj << dendl;
   t->touch(coll_t::meta(), entry->m_meta_obj);
   return entry;

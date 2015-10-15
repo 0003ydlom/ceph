@@ -132,10 +132,11 @@ noinst_HEADERS += \
 LIBCOMMON_DEPS += \
 	$(LIBERASURE_CODE) \
 	$(LIBMSG) $(LIBAUTH) \
-	$(LIBCRUSH) $(LIBJSON_SPIRIT) $(LIBLOG) $(LIBARCH)
+	$(LIBCRUSH) $(LIBJSON_SPIRIT) $(LIBLOG) $(LIBARCH) \
+	$(BOOST_RANDOM_LIBS)
 
 if LINUX
-LIBCOMMON_DEPS += -lrt -lblkid -luuid
+LIBCOMMON_DEPS += -lrt -lblkid
 endif # LINUX
 
 libcommon_la_SOURCES = common/buffer.cc

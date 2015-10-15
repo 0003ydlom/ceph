@@ -8,7 +8,7 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 
-AC_INIT([ceph], [9.0.2], [ceph-devel@vger.kernel.org])
+AC_INIT([ceph], [9.1.0], [ceph-devel@vger.kernel.org])
 
 AX_CXX_COMPILE_STDCXX_11(, mandatory)
 
@@ -46,13 +46,12 @@ AC_CANONICAL_TARGET
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
 
 # Automake
-AM_INIT_AUTOMAKE
 AM_PROG_CC_C_O
 AM_PROG_LIBTOOL
 AM_PROG_AS
 
 
-AM_INIT_AUTOMAKE([foreign parallel-tests])
+AM_INIT_AUTOMAKE([foreign parallel-tests tar-ustar])
 # enable make V=0 (if automake >1.11)
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
@@ -219,7 +218,7 @@ if test x"$YASM_CHECK" = x"yes"; then
            AC_DEFINE([HAVE_GOOD_YASM_ELF64], [1], [we have a recent yasm and are x86_64])
            with_good_yasm=yes
   
-           if yasm -f elf64 -i src/ceph/src/ceph/src/erasure-code/isa/isa-l/include/ src/erasure-code/isa/isa-l/erasure_code/gf_vect_dot_prod_avx2.asm.s -o /dev/null 2> /dev/null ; then
+           if yasm -f elf64 -i src/erasure-code/isa/isa-l/include/ src/erasure-code/isa/isa-l/erasure_code/gf_vect_dot_prod_avx2.asm.s -o /dev/null 2> /dev/null ; then
               echo 'yasm can also build the isa-l stuff'
               AC_DEFINE([HAVE_BETTER_YASM_ELF64], [1], [yasm can also build the isa-l])
   	    with_better_yasm=yes
@@ -274,7 +273,6 @@ AX_C_PRETTY_FUNC
 # Checks for libraries.
 ACX_PTHREAD
 
-AC_CHECK_LIB([uuid], [uuid_parse], [true], AC_MSG_FAILURE([libuuid not found]))
 
 #Linux only dependencies
 if test x"$linux" = x"yes"; then
@@ -419,12 +417,6 @@ AC_ARG_ENABLE(gitversion,
 
 AM_CONDITIONAL(NO_GIT_VERSION, [test "x$enable_gitversion" = "xno"])
 
-AC_ARG_ENABLE([root-make-check],
-            [AS_HELP_STRING([--enable-root-make-check], [enable make check tests that require root privileges])],
-            [],
-            [enable_root_make_check=no])
-AM_CONDITIONAL(ENABLE_ROOT_MAKE_CHECK, test "x$enable_root_make_check" != xno)
-
 # profiler?
 AC_ARG_WITH([profiler],
             [AS_HELP_STRING([--with-profiler], [build extra profiler binaries])],
@@ -509,20 +501,11 @@ AC_ARG_WITH([fuse],
             [],
             [with_fuse=yes])
 LIBFUSE=
-AS_IF([test "x$with_fuse" != xno],
-	    [AC_CHECK_LIB([fuse], [fuse_main],
-             [AC_SUBST([LIBFUSE], ["-lfuse"])
-               AC_DEFINE([HAVE_LIBFUSE], [1],
-                         [Define if you have fuse])
-               HAVE_LIBFUSE=1
-	       # look for fuse_getgroups and define FUSE_GETGROUPS if found
-           LIBS_saved="$LIBS"
-           LIBS="$LIBS -lfuse"
-	       AC_CHECK_FUNCS([fuse_getgroups])
-           LIBS="$LIBS_saved"
-              ],
-             [AC_MSG_FAILURE(
-                   [no FUSE found (use --without-fuse to disable)])])])
+AS_IF([test "x$with_fuse" != xno], [
+  PKG_CHECK_MODULES([LIBFUSE], [fuse],
+    [HAVE_LIBFUSE=1],
+    [AC_MSG_FAILURE([no FUSE found (use --without-fuse to disable)])])
+])
 AM_CONDITIONAL(WITH_FUSE, [test "$HAVE_LIBFUSE" = "1"])
 
 # jemalloc?
@@ -916,6 +899,17 @@ BOOST_THREAD_LIBS="${LIBS}"
 LIBS="${saved_LIBS}"
 AC_SUBST(BOOST_THREAD_LIBS)
 
+# boost-random
+BOOST_RANDOM_LIBS=""
+saved_LIBS="${LIBS}"
+LIBS=""
+AC_CHECK_LIB(boost_random-mt, main, [],
+    [AC_CHECK_LIB(boost_random, main, [],
+        AC_MSG_FAILURE(["Boost random library not found."]))])
+BOOST_RANDOM_LIBS="${LIBS}"
+LIBS="${saved_LIBS}"
+AC_SUBST(BOOST_RANDOM_LIBS)
+
 #
 # Check for boost_program_options library (defines BOOST_PROGRAM_OPTIONS_LIBS).
 #
@@ -954,6 +948,11 @@ AC_CHECK_HEADERS([ \
 	syslog.h \
 	utime.h \
 ])
+
+# name_to_handle_at
+AC_CHECK_FUNC([name_to_handle_at],
+	[AC_DEFINE([HAVE_NAME_TO_HANDLE_AT], [], [name_to_handle_at exists])],
+	[])
 
 # sync_file_range
 AC_CHECK_FUNC([sync_file_range],
@@ -1342,7 +1341,5 @@ AC_CONFIG_FILES([Makefile
 	man/Makefile
 	doc/Makefile
 	selinux/Makefile
-	systemd/ceph-osd@.service
-	systemd/ceph-rgw.tmpfiles.d
 	ceph.spec])
 AC_OUTPUT
