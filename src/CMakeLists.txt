@@ -498,6 +498,11 @@ if(${WITH_RADOSGW})
     resolv
   )
 endif(${WITH_RADOSGW})
+if(${WITH_RBD})
+  set(DENCODER_EXTRALIBS
+      ${DENCODER_EXTRALIBS}
+      librbd_replay_types)
+endif(${WITH_RBD})
 target_link_libraries(ceph-dencoder
   librados
   librbd
@@ -554,6 +559,7 @@ set(ceph_mon_srcs
   ceph_mon.cc
   common/TextTable.cc)
 add_executable(ceph-mon ${ceph_mon_srcs} $<TARGET_OBJECTS:heap_profiler_objs>)
+add_dependencies(ceph-mon erasure_code_plugins)
 target_link_libraries(ceph-mon mon boost_thread common os global ${EXTRALIBS}
   ${CMAKE_DL_LIBS} ${TCMALLOC_LIBS})
 install(TARGETS ceph-mon DESTINATION bin)
@@ -641,6 +647,7 @@ set(ceph_osd_srcs
 add_executable(ceph-osd ${ceph_osd_srcs}
   $<TARGET_OBJECTS:heap_profiler_objs>
   $<TARGET_OBJECTS:common_util_obj>)
+add_dependencies(ceph-osd erasure_code_plugins)
 target_link_libraries(ceph-osd osd os global ${BLKID_LIBRARIES} ${TCMALLOC_LIBS})
 install(TARGETS ceph-osd DESTINATION bin)
 
@@ -878,16 +885,19 @@ if(${WITH_RBD})
   install(TARGETS rbd DESTINATION bin)
   install(PROGRAMS ${CMAKE_SOURCE_DIR}/src/ceph-rbdnamer DESTINATION bin)
 
+  set(librbd_replay_types_srcs
+      rbd_replay/ActionTypes.cc)
+  add_library(librbd_replay_types STATIC ${librbd_replay_types_srcs})
+
   set(librbd_replay_srcs
-      rbd_replay/actions.cc 
-      rbd_replay/Deser.cc 
-      rbd_replay/ImageNameMap.cc 
-      rbd_replay/PendingIO.cc 
-      rbd_replay/rbd_loc.cc 
-      rbd_replay/Replayer.cc 
-      rbd_replay/Ser.cc)
+      rbd_replay/actions.cc
+      rbd_replay/BufferReader.cc
+      rbd_replay/ImageNameMap.cc
+      rbd_replay/PendingIO.cc
+      rbd_replay/rbd_loc.cc
+      rbd_replay/Replayer.cc)
   add_library(librbd_replay STATIC ${librbd_replay_srcs})
-  target_link_libraries(librbd_replay PRIVATE librbd librados global udev)
+  target_link_libraries(librbd_replay PRIVATE librbd_replay_types librbd librados global udev)
 
   add_executable(rbd_replay
     rbd_replay/rbd-replay.cc
@@ -1010,3 +1020,24 @@ if(${WITH_RADOSGW})
     curl expat global fcgi resolv ${TCMALLOC_LIBS})
   install(TARGETS radosgw-object-expirer DESTINATION bin)
 endif(${WITH_RADOSGW})
+
+# Everything you need to spin up a cluster with vstart.sh
+add_custom_target(vstart DEPENDS
+    ceph-osd
+    ceph-mon
+    ceph-mds
+    ceph-authtool
+    ceph-conf
+    monmaptool
+    crushtool)
+
+# Everything you need to run CephFS tests
+add_custom_target(cephfs_testing DEPENDS
+    vstart
+    rados
+    ceph-fuse
+    ceph-dencoder
+    cephfs-journal-tool
+    cephfs-data-scan
+    cephfs-table-tool)
+
