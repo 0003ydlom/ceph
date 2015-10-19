@@ -149,8 +149,8 @@ public:
       *enc_key, (const byte*)CEPH_AES_IV);
     CryptoPP::StreamTransformationFilter stfEncryptor(cbc, sink);
 
-    for (std::list<bufferptr>::const_iterator it = in.buffers().begin();
-	 it != in.buffers().end(); ++it) {
+    for (buffer::list::ptr_list_t::const_iterator it = in.get_raw_ptr_list().begin();
+	 it != in.get_raw_ptr_list().end(); ++it) {
       const unsigned char *in_buf = (const unsigned char *)it->c_str();
       stfEncryptor.Put(in_buf, it->length());
     }
@@ -175,8 +175,8 @@ public:
     CryptoPP::CBC_Mode_ExternalCipher::Decryption cbc(
       *dec_key, (const byte*)CEPH_AES_IV );
     CryptoPP::StreamTransformationFilter stfDecryptor(cbc, sink);
-    for (std::list<bufferptr>::const_iterator it = in.buffers().begin();
-	 it != in.buffers().end(); ++it) {
+    for (buffer::list::ptr_list_t::const_iterator it = in.get_raw_ptr_list().begin();
+	 it != in.get_raw_ptr_list().end(); ++it) {
       const unsigned char *in_buf = (const unsigned char *)it->c_str();
       stfDecryptor.Put(in_buf, it->length());
     }
