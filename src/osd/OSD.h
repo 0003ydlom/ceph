@@ -1610,11 +1610,12 @@ private:
     vector<ShardData*> shard_list;
     OSD *osd;
     uint32_t num_shards;
+    uint32_t currshard;
 
   public:
     ShardedOpWQ(uint32_t pnum_shards, OSD *o, time_t ti, time_t si, ShardedThreadPool* tp):
       ShardedThreadPool::ShardedWQ < pair <PGRef, PGQueueable> >(ti, si, tp),
-      osd(o), num_shards(pnum_shards) {
+      osd(o), num_shards(pnum_shards), currshard(0) {
       for(uint32_t i = 0; i < num_shards; i++) {
 	char lock_name[32] = {0};
 	snprintf(lock_name, sizeof(lock_name), "%s.%d", "OSD:ShardedOpWQ:", i);
