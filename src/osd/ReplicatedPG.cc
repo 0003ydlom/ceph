@@ -2859,6 +2859,7 @@ void ReplicatedPG::execute_ctx(OpContext *ctx)
     map<client_t,ceph_tid_t>::iterator p = cm.find(n);
     if (p == cm.end()) {
       dout(20) << " op order client." << n << " tid " << t << " (first)" << dendl;
+      // tutaj zalozyc locka
       cm[n] = t;
     } else {
       dout(20) << " op order client." << n << " tid " << t << " last was " << p->second << dendl;
