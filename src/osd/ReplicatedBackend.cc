@@ -22,6 +22,13 @@
 #include "messages/MOSDPGPull.h"
 #include "messages/MOSDPGPushReply.h"
 
+#ifdef WITH_LTTNG
+#include "tracing/replication.h"
+#else
+#define tracepoint(...)
+#endif
+
+
 #define dout_subsys ceph_subsys_osd
 #define DOUT_PREFIX_ARGS this
 #undef dout_prefix
@@ -689,6 +696,18 @@ void ReplicatedBackend::sub_op_modify_reply(OpRequestRef op)
     map<ceph_tid_t, InProgressOp>::iterator iter =
       in_progress_ops.find(rep_tid);
     InProgressOp &ip_op = iter->second;
+
+    // trace when replication op reply from replica osd is received by primary osd
+    // include current osd and replica osd for better lttng parsing
+    {
+#ifdef WITH_LTTNG
+      osd_reqid_t reqid = ip_op.op->get_reqid();
+#endif
+    tracepoint(replicated_backend, replication_op_received,
+    		get_parent()->whoami(), r->from.osd, reqid.name.type(),
+  			reqid.name.num(), reqid.tid, reqid.inc);
+    }
+
     MOSDOp *m = NULL;
     if (ip_op.op)
       m = static_cast<MOSDOp *>(ip_op.op->get_req());
@@ -1051,6 +1070,7 @@ void ReplicatedBackend::issue_op(
     if (op->op)
       op->op->mark_sub_op_sent(ss.str());
   }
+
   for (set<pg_shard_t>::const_iterator i =
 	 parent->get_actingbackfill_shards().begin();
        i != parent->get_actingbackfill_shards().end();
@@ -1058,7 +1078,6 @@ void ReplicatedBackend::issue_op(
     if (*i == parent->whoami_shard()) continue;
     pg_shard_t peer = *i;
     const pg_info_t &pinfo = parent->get_shard_info().find(peer)->second;
-
     Message *wr;
     uint64_t min_features = parent->min_peer_features();
     if (!(min_features & CEPH_FEATURE_OSD_REPOP)) {
@@ -1096,8 +1115,14 @@ void ReplicatedBackend::issue_op(
 	    pinfo);
     }
 
-    get_parent()->send_message_osd_cluster(
-      peer.osd, wr, get_osdmap()->get_epoch());
+    get_parent()->send_message_osd_cluster(peer.osd, wr, get_osdmap()->get_epoch());
+
+    // trace when replication op is sent to replica osd
+    // include current osd and replica osd for better lttng parsing
+    tracepoint(replicated_backend, replication_op_sent,
+    		get_parent()->whoami(), peer.osd, reqid.name.type(),
+			reqid.name.num(), reqid.tid, reqid.inc);
+
   }
 }
 

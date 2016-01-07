@@ -11,7 +11,8 @@ dist_noinst_DATA = \
 	oprequest.tp \
 	osd.tp \
 	pg.tp \
-	objectstore.tp
+	objectstore.tp \
+	replication.tp
 
 if WITH_LTTNG
 nodist_libosd_tp_la_SOURCES = \
@@ -20,7 +21,9 @@ nodist_libosd_tp_la_SOURCES = \
 	osd.c \
 	osd.h \
 	pg.h \
-	pg.c
+	pg.c \
+	replication.h \
+	replication.c
 endif
 libosd_tp_la_LIBADD = -llttng-ust -ldl
 libosd_tp_la_CPPFLAGS = -DTRACEPOINT_PROBE_DYNAMIC_LINKAGE
@@ -69,7 +72,8 @@ BUILT_SOURCES = \
 	oprequest.h \
 	osd.h \
 	pg.h \
-	objectstore.h
+	objectstore.h \
+	replication.h
 endif
 
 CLEANFILES = \

@@ -1,0 +1,41 @@
+#include "include/int_types.h"
+
+TRACEPOINT_EVENT(replicated_backend, replication_op_sent,
+    TP_ARGS(
+	// replication details
+        uint8_t,  current_osd,
+        uint8_t,  target_osd,
+	// osd_reqid_t
+	uint8_t,  type,
+	int64_t,  num,	
+        uint64_t, tid,
+        int32_t,  inc),
+    TP_FIELDS(
+	ctf_integer(uint8_t, current_osd, current_osd)	
+        ctf_integer(uint8_t, target_osd, target_osd)
+        ctf_integer(uint8_t, type, type)
+        ctf_integer(int64_t, num, num)
+        ctf_integer(uint64_t, tid, tid)
+        ctf_integer(int32_t, inc, inc)
+    )
+)
+
+TRACEPOINT_EVENT(replicated_backend, replication_op_received,
+    TP_ARGS(
+        // replication details
+        uint8_t,  current_osd,
+        uint8_t,  from_osd,
+        // osd_reqid_t
+        uint8_t,  type,
+        int64_t,  num,
+        uint64_t, tid,
+        int32_t,  inc),
+    TP_FIELDS(
+        ctf_integer(uint8_t, current_osd, current_osd)
+        ctf_integer(uint8_t, from_osd, from_osd)
+        ctf_integer(uint8_t, type, type)
+        ctf_integer(int64_t, num, num)
+        ctf_integer(uint64_t, tid, tid)
+        ctf_integer(int32_t, inc, inc)
+    )
+)

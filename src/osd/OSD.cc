@@ -8316,7 +8316,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb ) 
 #ifdef WITH_LTTNG
     osd_reqid_t reqid = op->get_reqid();
 #endif
-    tracepoint(osd, opwq_process_start, reqid.name._type,
+    tracepoint(osd, opwq_process_start, osd->get_nodeid(), reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
 
@@ -8335,7 +8335,7 @@ void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb ) 
 #ifdef WITH_LTTNG
     osd_reqid_t reqid = op->get_reqid();
 #endif
-    tracepoint(osd, opwq_process_finish, reqid.name._type,
+    tracepoint(osd, opwq_process_finish, osd->get_nodeid(), reqid.name._type,
         reqid.name._num, reqid.tid, reqid.inc);
   }
 
