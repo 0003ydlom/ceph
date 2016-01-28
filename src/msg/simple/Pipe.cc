@@ -639,7 +639,7 @@ int Pipe::accept()
   }
   ldout(msgr->cct,10) << "accept replacing " << existing << dendl;
   existing->stop();
-  existing->unregister_pipe();
+  existing->unregister_me();
   replaced = true;
 
   if (existing->policy.lossy) {
@@ -725,7 +725,7 @@ int Pipe::accept()
     goto shutting_down;
   removed = msgr->accepting_pipes.erase(this);
   assert(removed == 1);
-  register_pipe();
+  register_me();
   msgr->lock.Unlock();
   pipe_lock.Unlock();
 
@@ -1233,26 +1233,12 @@ int Pipe::connect()
   return -1;
 }
 
-void Pipe::register_pipe()
-{
-  ldout(msgr->cct,10) << "register_pipe" << dendl;
-  assert(msgr->lock.is_locked());
-  Pipe *existing = msgr->_lookup_pipe(peer_addr);
-  assert(existing == NULL);
-  msgr->rank_pipe[peer_addr] = this;
+void Pipe::register_me() {
+	msgr->register_pipe(this);
 }
 
-void Pipe::unregister_pipe()
-{
-  assert(msgr->lock.is_locked());
-  ceph::unordered_map<entity_addr_t,Pipe*>::iterator p = msgr->rank_pipe.find(peer_addr);
-  if (p != msgr->rank_pipe.end() && p->second == this) {
-    ldout(msgr->cct,10) << "unregister_pipe" << dendl;
-    msgr->rank_pipe.erase(p);
-  } else {
-    ldout(msgr->cct,10) << "unregister_pipe - not registered" << dendl;
-    msgr->accepting_pipes.erase(this);  // somewhat overkill, but safe.
-  }
+void Pipe::unregister_me() {
+	msgr->unregister_pipe(this);
 }
 
 void Pipe::join()
@@ -1372,7 +1358,7 @@ void Pipe::fault(bool onread)
 
     msgr->lock.Lock();
     pipe_lock.Lock();
-    unregister_pipe();
+    unregister_me();
     msgr->lock.Unlock();
 
     if (delay_thread)

@@ -390,6 +390,9 @@ public:
    */
   void dispatch_throttle_release(uint64_t msize);
 
+  void register_pipe(Pipe *pipe);
+  void unregister_pipe(Pipe *pipe);
+
   /**
    * This function is used by the reaper thread. As long as nobody
    * has set reaper_stop, it calls the reaper function, then

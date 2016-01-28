@@ -206,6 +206,28 @@ void SimpleMessenger::dispatch_throttle_release(uint64_t msize)
   }
 }
 
+void SimpleMessenger::register_pipe(Pipe *pipe)
+{
+  ldout(cct,10) << "register_pipe" << dendl;
+  assert(lock.is_locked());
+  Pipe *existing = _lookup_pipe(pipe->peer_addr);
+  assert(existing == NULL);
+  rank_pipe[pipe->peer_addr] = pipe;
+}
+
+void SimpleMessenger::unregister_pipe(Pipe *pipe)
+{
+  assert(lock.is_locked());
+  ceph::unordered_map<entity_addr_t,Pipe*>::iterator p = rank_pipe.find(pipe->peer_addr);
+  if (p != rank_pipe.end() && p->second == pipe) {
+    ldout(cct,10) << "unregister_pipe" << dendl;
+    rank_pipe.erase(p);
+  } else {
+    ldout(cct,10) << "unregister_pipe - not registered" << dendl;
+    accepting_pipes.erase(pipe);  // somewhat overkill, but safe.
+  }
+}
+
 void SimpleMessenger::reaper_entry()
 {
   ldout(cct,10) << "reaper_entry start" << dendl;
@@ -233,6 +255,7 @@ void SimpleMessenger::reaper()
     pipe_reap_queue.pop_front();
     ldout(cct,10) << "reaper reaping pipe " << p << " " <<
       p->get_peer_addr() << dendl;
+
     p->pipe_lock.Lock();
     p->discard_out_queue();
     if (p->connection_state) {
@@ -242,8 +265,11 @@ void SimpleMessenger::reaper()
       bool cleared = p->connection_state->clear_pipe(p);
       assert(!cleared);
     }
+
     p->pipe_lock.Unlock();
-    p->unregister_pipe();
+
+
+    p->unregister_me();
     assert(pipes.count(p));
     pipes.erase(p);
 
@@ -375,7 +401,7 @@ Pipe *SimpleMessenger::connect_rank(const entity_addr_t& addr,
   if (first)
     pipe->_send(first);
   pipe->pipe_lock.Unlock();
-  pipe->register_pipe();
+  pipe->register_me();
   pipes.insert(pipe);
 
   return pipe;
@@ -571,7 +597,7 @@ void SimpleMessenger::wait()
 
     while (!rank_pipe.empty()) {
       Pipe *p = rank_pipe.begin()->second;
-      p->unregister_pipe();
+      p->unregister_me();
       p->pipe_lock.Lock();
       p->stop_and_wait();
       p->pipe_lock.Unlock();
@@ -613,7 +639,7 @@ void SimpleMessenger::mark_down_all()
     Pipe *p = it->second;
     ldout(cct,5) << "mark_down_all " << it->first << " " << p << dendl;
     rank_pipe.erase(it);
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     PipeConnectionRef con = p->connection_state;
@@ -630,7 +656,7 @@ void SimpleMessenger::mark_down(const entity_addr_t& addr)
   Pipe *p = _lookup_pipe(addr);
   if (p) {
     ldout(cct,1) << "mark_down " << addr << " -- " << p << dendl;
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     if (p->connection_state) {
@@ -657,7 +683,7 @@ void SimpleMessenger::mark_down(Connection *con)
   if (p) {
     ldout(cct,1) << "mark_down " << con << " -- " << p << dendl;
     assert(p->msgr == this);
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     if (p->connection_state) {
