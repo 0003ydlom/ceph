@@ -32,6 +32,11 @@ static ostream& _prefix(std::ostream *_dout, SimpleMessenger *msgr) {
   return *_dout << "-- " << msgr->get_myaddr() << " ";
 }
 
+/*
+ * Single static instance of global reaper
+ */
+SimpleMessenger::SingleReaper SimpleMessenger::single_reaper;
+
 
 /*******************
  * SimpleMessenger
@@ -42,14 +47,12 @@ SimpleMessenger::SimpleMessenger(CephContext *cct, entity_name_t name,
   : SimplePolicyMessenger(cct, name,mname, _nonce),
     accepter(this, _nonce),
     dispatch_queue(cct, this),
-    reaper_thread(this),
     nonce(_nonce),
     lock("SimpleMessenger::lock"), need_addr(true), did_bind(false),
     global_seq(0),
     cluster_protocol(0),
     dispatch_throttler(cct, string("msgr_dispatch_throttler-") + mname,
 		       cct->_conf->ms_dispatch_throttle_bytes),
-    reaper_started(false), reaper_stop(false),
     timeout(0),
     local_connection(new PipeConnection(cct, this))
 {
@@ -66,7 +69,7 @@ SimpleMessenger::~SimpleMessenger()
 {
   assert(!did_bind); // either we didn't bind or we shut down the Accepter
   assert(rank_pipe.empty()); // we don't have any running Pipes.
-  assert(!reaper_started); // the reaper thread is stopped
+  ceph_spin_destroy(&global_seq_lock);
 }
 
 void SimpleMessenger::ready()
@@ -202,70 +205,43 @@ void SimpleMessenger::dispatch_throttle_release(uint64_t msize)
   }
 }
 
-void SimpleMessenger::reaper_entry()
+void SimpleMessenger::register_pipe(Pipe *pipe)
 {
-  ldout(cct,10) << "reaper_entry start" << dendl;
-  lock.Lock();
-  while (!reaper_stop) {
-    reaper();  // may drop and retake the lock
-    if (reaper_stop)
-      break;
-    reaper_cond.Wait(lock);
-  }
-  lock.Unlock();
-  ldout(cct,10) << "reaper_entry done" << dendl;
+  ldout(cct,10) << "register_pipe" << dendl;
+  assert(lock.is_locked());
+  Pipe *existing = _lookup_pipe(pipe->peer_addr);
+  assert(existing == NULL);
+  rank_pipe[pipe->peer_addr] = pipe;
 }
 
-/*
- * note: assumes lock is held
- */
-void SimpleMessenger::reaper()
+void SimpleMessenger::unregister_pipe(Pipe *pipe)
 {
-  ldout(cct,10) << "reaper" << dendl;
   assert(lock.is_locked());
-
-  while (!pipe_reap_queue.empty()) {
-    Pipe *p = pipe_reap_queue.front();
-    pipe_reap_queue.pop_front();
-    ldout(cct,10) << "reaper reaping pipe " << p << " " <<
-      p->get_peer_addr() << dendl;
-    p->pipe_lock.Lock();
-    p->discard_out_queue();
-    if (p->connection_state) {
-      // mark_down, mark_down_all, or fault() should have done this,
-      // or accept() may have switch the Connection to a different
-      // Pipe... but make sure!
-      bool cleared = p->connection_state->clear_pipe(p);
-      assert(!cleared);
-    }
-    p->pipe_lock.Unlock();
-    p->unregister_pipe();
-    assert(pipes.count(p));
-    pipes.erase(p);
-
-    // drop msgr lock while joining thread; the delay through could be
-    // trying to fast dispatch, preventing it from joining without
-    // blocking and deadlocking.
-    lock.Unlock();
-    p->join();
-    lock.Lock();
-
-    if (p->sd >= 0)
-      ::close(p->sd);
-    ldout(cct,10) << "reaper reaped pipe " << p << " " << p->get_peer_addr() << dendl;
-    p->put();
-    ldout(cct,10) << "reaper deleted pipe " << p << dendl;
+  ceph::unordered_map<entity_addr_t,Pipe*>::iterator p = rank_pipe.find(pipe->peer_addr);
+  if (p != rank_pipe.end() && p->second == pipe) {
+    ldout(cct,10) << "unregister_pipe" << dendl;
+    rank_pipe.erase(p);
+  } else {
+    ldout(cct,10) << "unregister_pipe - not registered" << dendl;
+    accepting_pipes.erase(pipe);  // somewhat overkill, but safe.
   }
-  ldout(cct,10) << "reaper done" << dendl;
 }
 
 void SimpleMessenger::queue_reap(Pipe *pipe)
 {
   ldout(cct,10) << "queue_reap " << pipe << dendl;
-  lock.Lock();
-  pipe_reap_queue.push_back(pipe);
+ // lock.Lock();
+
+
+  unregister_pipe(pipe);
+  assert(pipes.count(pipe));
+  pipes.erase(pipe);
+
+
+  single_reaper.queue(pipe);
+
   reaper_cond.Signal();
-  lock.Unlock();
+//  lock.Unlock();
 }
 
 bool SimpleMessenger::is_connected(Connection *con)
@@ -328,8 +304,8 @@ int SimpleMessenger::start()
 
   lock.Unlock();
 
-  reaper_started = true;
-  reaper_thread.create();
+  single_reaper.start();
+
   return 0;
 }
 
@@ -371,7 +347,7 @@ Pipe *SimpleMessenger::connect_rank(const entity_addr_t& addr,
   if (first)
     pipe->_send(first);
   pipe->pipe_lock.Unlock();
-  pipe->register_pipe();
+  pipe->register_me();
   pipes.insert(pipe);
 
   return pipe;
@@ -548,7 +524,7 @@ void SimpleMessenger::wait()
     did_bind = false;
     ldout(cct,20) << "wait: stopped accepter thread" << dendl;
   }
-
+/*
   if (reaper_started) {
     ldout(cct,20) << "wait: stopping reaper thread" << dendl;
     lock.Lock();
@@ -559,6 +535,7 @@ void SimpleMessenger::wait()
     reaper_started = false;
     ldout(cct,20) << "wait: stopped reaper thread" << dendl;
   }
+*/
 
   // close+reap all pipes
   lock.Lock();
@@ -567,18 +544,40 @@ void SimpleMessenger::wait()
 
     while (!rank_pipe.empty()) {
       Pipe *p = rank_pipe.begin()->second;
-      p->unregister_pipe();
       p->pipe_lock.Lock();
       p->stop_and_wait();
       p->pipe_lock.Unlock();
     }
 
+
+    while (!pipes.empty()) {
+ /*     for (typename set<Pipe*>::iterator i = pipes.begin() ; i != pipes.end() ; ++i) {
+    	  Pipe *asd = *i;
+    	  std::cout<<"Pajpka: " << (void*)(*i) <<", ws: " << asd->writer_running << ", rs: " << asd->reader_running << std::endl;
+      } */
+
+      reaper_cond.Wait(lock);
+   //   reaper();
+    }
+
+    /*
+    while (!pipes.empty()) {
+    	typename set<Pipe*>::iterator i = pipes.begin();
+    		std::cout<<"Kładę " << (void*)&(*i) << std::endl;
+    		queue_reap(*i);
+    }
+     */
+
+
+
+    /*
     reaper();
     ldout(cct,10) << "wait: waiting for pipes " << pipes << " to close" << dendl;
     while (!pipes.empty()) {
+      std::cout<<"Pajp: " << pipes.size() << ", to_reap: " << pipe_reap_queue.size() << std::endl;
       reaper_cond.Wait(lock);
       reaper();
-    }
+    }*/
   }
   lock.Unlock();
 
@@ -609,7 +608,7 @@ void SimpleMessenger::mark_down_all()
     Pipe *p = it->second;
     ldout(cct,5) << "mark_down_all " << it->first << " " << p << dendl;
     rank_pipe.erase(it);
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     PipeConnectionRef con = p->connection_state;
@@ -626,7 +625,7 @@ void SimpleMessenger::mark_down(const entity_addr_t& addr)
   Pipe *p = _lookup_pipe(addr);
   if (p) {
     ldout(cct,1) << "mark_down " << addr << " -- " << p << dendl;
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     if (p->connection_state) {
@@ -653,7 +652,7 @@ void SimpleMessenger::mark_down(Connection *con)
   if (p) {
     ldout(cct,1) << "mark_down " << con << " -- " << p << dendl;
     assert(p->msgr == this);
-    p->unregister_pipe();
+    p->unregister_me();
     p->pipe_lock.Lock();
     p->stop();
     if (p->connection_state) {

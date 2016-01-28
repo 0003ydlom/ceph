@@ -67,6 +67,7 @@ Pipe::Pipe(SimpleMessenger *r, int st, PipeConnection *con)
     writer_thread(this),
     delay_thread(NULL),
     msgr(r),
+	cct(r->cct),
     conn_id(r->dispatch_queue.get_id()),
     recv_ofs(0),
     recv_len(0),
@@ -87,20 +88,20 @@ Pipe::Pipe(SimpleMessenger *r, int st, PipeConnection *con)
     connection_state = con;
     connection_state->reset_pipe(this);
   } else {
-    connection_state = new PipeConnection(msgr->cct, msgr);
+    connection_state = new PipeConnection(cct, msgr);
     connection_state->pipe = get();
   }
 
   if (randomize_out_seq()) {
-    lsubdout(msgr->cct,ms,15) << "Pipe(): Could not get random bytes to set seq number for session reset; set seq number to " << out_seq << dendl;
+    lsubdout(cct,ms,15) << "Pipe(): Could not get random bytes to set seq number for session reset; set seq number to " << out_seq << dendl;
   }
     
 
-  msgr->timeout = msgr->cct->_conf->ms_tcp_read_timeout * 1000; //convert to ms
+  msgr->timeout = cct->_conf->ms_tcp_read_timeout * 1000; //convert to ms
   if (msgr->timeout == 0)
     msgr->timeout = -1;
 
-  recv_max_prefetch = msgr->cct->_conf->ms_tcp_prefetch_max_size;
+  recv_max_prefetch = cct->_conf->ms_tcp_prefetch_max_size;
   recv_buf = new char[recv_max_prefetch];
 }
 
@@ -114,13 +115,13 @@ Pipe::~Pipe()
 
 void Pipe::handle_ack(uint64_t seq)
 {
-  lsubdout(msgr->cct, ms, 15) << "reader got ack seq " << seq << dendl;
+  lsubdout(cct, ms, 15) << "reader got ack seq " << seq << dendl;
   // trim sent list
   while (!sent.empty() &&
 	 sent.front()->get_seq() <= seq) {
     Message *m = sent.front();
     sent.pop_front();
-    lsubdout(msgr->cct, ms, 10) << "reader got ack seq "
+    lsubdout(cct, ms, 10) << "reader got ack seq "
 				<< seq << " >= " << m->get_seq() << " on " << m << " " << *m << dendl;
     m->put();
   }
@@ -135,14 +136,15 @@ void Pipe::start_reader()
     reader_needs_join = false;
   }
   reader_running = true;
-  reader_thread.create(msgr->cct->_conf->ms_rwthread_stack_bytes);
+
+  reader_thread.create("ms_pipe_read", cct->_conf->ms_rwthread_stack_bytes);
 }
 
 void Pipe::maybe_start_delay_thread()
 {
   if (!delay_thread &&
-      msgr->cct->_conf->ms_inject_delay_type.find(ceph_entity_type_name(connection_state->peer_type)) != string::npos) {
-    lsubdout(msgr->cct, ms, 1) << "setting up a delay queue on Pipe " << this << dendl;
+      cct->_conf->ms_inject_delay_type.find(ceph_entity_type_name(connection_state->peer_type)) != string::npos) {
+    lsubdout(cct, ms, 1) << "setting up a delay queue on Pipe " << this << dendl;
     delay_thread = new DelayedDelivery(this);
     delay_thread->create();
   }
@@ -169,7 +171,7 @@ void Pipe::join_reader()
 
 void Pipe::DelayedDelivery::discard()
 {
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::discard" << dendl;
+  lgeneric_subdout(pipe->cct, ms, 20) << *pipe << "DelayedDelivery::discard" << dendl;
   Mutex::Locker l(delay_lock);
   while (!delay_queue.empty()) {
     Message *m = delay_queue.front().second;
@@ -181,7 +183,7 @@ void Pipe::DelayedDelivery::discard()
 
 void Pipe::DelayedDelivery::flush()
 {
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::flush" << dendl;
+  lgeneric_subdout(pipe->cct, ms, 20) << *pipe << "DelayedDelivery::flush" << dendl;
   Mutex::Locker l(delay_lock);
   flush_count = delay_queue.size();
   delay_cond.Signal();
@@ -190,25 +192,25 @@ void Pipe::DelayedDelivery::flush()
 void *Pipe::DelayedDelivery::entry()
 {
   Mutex::Locker locker(delay_lock);
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::entry start" << dendl;
+  lgeneric_subdout(pipe->cct, ms, 20) << *pipe << "DelayedDelivery::entry start" << dendl;
 
   while (!stop_delayed_delivery) {
     if (delay_queue.empty()) {
-      lgeneric_subdout(pipe->msgr->cct, ms, 30) << *pipe << "DelayedDelivery::entry sleeping on delay_cond because delay queue is empty" << dendl;
+      lgeneric_subdout(pipe->cct, ms, 30) << *pipe << "DelayedDelivery::entry sleeping on delay_cond because delay queue is empty" << dendl;
       delay_cond.Wait(delay_lock);
       continue;
     }
     utime_t release = delay_queue.front().first;
     Message *m = delay_queue.front().second;
-    string delay_msg_type = pipe->msgr->cct->_conf->ms_inject_delay_msg_type;
+    string delay_msg_type = pipe->cct->_conf->ms_inject_delay_msg_type;
     if (!flush_count &&
-        (release > ceph_clock_now(pipe->msgr->cct) &&
+        (release > ceph_clock_now(pipe->cct) &&
          (delay_msg_type.empty() || m->get_type_name() == delay_msg_type))) {
-      lgeneric_subdout(pipe->msgr->cct, ms, 10) << *pipe << "DelayedDelivery::entry sleeping on delay_cond until " << release << dendl;
+      lgeneric_subdout(pipe->cct, ms, 10) << *pipe << "DelayedDelivery::entry sleeping on delay_cond until " << release << dendl;
       delay_cond.WaitUntil(delay_lock, release);
       continue;
     }
-    lgeneric_subdout(pipe->msgr->cct, ms, 10) << *pipe << "DelayedDelivery::entry dequeuing message " << m << " for delivery, past " << release << dendl;
+    lgeneric_subdout(pipe->cct, ms, 10) << *pipe << "DelayedDelivery::entry dequeuing message " << m << " for delivery, past " << release << dendl;
     delay_queue.pop_front();
     if (flush_count > 0) {
       --flush_count;
@@ -233,7 +235,7 @@ void *Pipe::DelayedDelivery::entry()
     }
     active_flush = false;
   }
-  lgeneric_subdout(pipe->msgr->cct, ms, 20) << *pipe << "DelayedDelivery::entry stop" << dendl;
+  lgeneric_subdout(pipe->cct, ms, 20) << *pipe << "DelayedDelivery::entry stop" << dendl;
   return NULL;
 }
 
@@ -247,7 +249,7 @@ void Pipe::DelayedDelivery::stop_fast_dispatching() {
 
 int Pipe::accept()
 {
-  ldout(msgr->cct,10) << "accept" << dendl;
+  ldout(cct,10) << "accept" << dendl;
   assert(pipe_lock.is_locked());
   assert(state == STATE_ACCEPTING);
 
@@ -290,7 +292,7 @@ int Pipe::accept()
   // announce myself.
   r = tcp_write(CEPH_BANNER, strlen(CEPH_BANNER));
   if (r < 0) {
-    ldout(msgr->cct,10) << "accept couldn't write banner" << dendl;
+    ldout(cct,10) << "accept couldn't write banner" << dendl;
     goto fail_unlocked;
   }
 
@@ -303,27 +305,27 @@ int Pipe::accept()
   len = sizeof(socket_addr.ss_addr());
   r = ::getpeername(sd, (sockaddr*)&socket_addr.ss_addr(), &len);
   if (r < 0) {
-    ldout(msgr->cct,0) << "accept failed to getpeername " << cpp_strerror(errno) << dendl;
+    ldout(cct,0) << "accept failed to getpeername " << cpp_strerror(errno) << dendl;
     goto fail_unlocked;
   }
   ::encode(socket_addr, addrs);
 
   r = tcp_write(addrs.c_str(), addrs.length());
   if (r < 0) {
-    ldout(msgr->cct,10) << "accept couldn't write my+peer addr" << dendl;
+    ldout(cct,10) << "accept couldn't write my+peer addr" << dendl;
     goto fail_unlocked;
   }
 
-  ldout(msgr->cct,1) << "accept sd=" << sd << " " << socket_addr << dendl;
+  ldout(cct,1) << "accept sd=" << sd << " " << socket_addr << dendl;
   
   // identify peer
   if (tcp_read(banner, strlen(CEPH_BANNER)) < 0) {
-    ldout(msgr->cct,10) << "accept couldn't read banner" << dendl;
+    ldout(cct,10) << "accept couldn't read banner" << dendl;
     goto fail_unlocked;
   }
   if (memcmp(banner, CEPH_BANNER, strlen(CEPH_BANNER))) {
     banner[strlen(CEPH_BANNER)] = 0;
-    ldout(msgr->cct,1) << "accept peer sent bad banner '" << banner << "' (should be '" << CEPH_BANNER << "')" << dendl;
+    ldout(cct,1) << "accept peer sent bad banner '" << banner << "' (should be '" << CEPH_BANNER << "')" << dendl;
     goto fail_unlocked;
   }
   {
@@ -331,7 +333,7 @@ int Pipe::accept()
     addrbl.push_back(tp);
   }
   if (tcp_read(addrbl.c_str(), addrbl.length()) < 0) {
-    ldout(msgr->cct,10) << "accept couldn't read peer_addr" << dendl;
+    ldout(cct,10) << "accept couldn't read peer_addr" << dendl;
     goto fail_unlocked;
   }
   {
@@ -339,20 +341,20 @@ int Pipe::accept()
     ::decode(peer_addr, ti);
   }
 
-  ldout(msgr->cct,10) << "accept peer addr is " << peer_addr << dendl;
+  ldout(cct,10) << "accept peer addr is " << peer_addr << dendl;
   if (peer_addr.is_blank_ip()) {
     // peer apparently doesn't know what ip they have; figure it out for them.
     int port = peer_addr.get_port();
     peer_addr.addr = socket_addr.addr;
     peer_addr.set_port(port);
-    ldout(msgr->cct,0) << "accept peer addr is really " << peer_addr
+    ldout(cct,0) << "accept peer addr is really " << peer_addr
 	    << " (socket is " << socket_addr << ")" << dendl;
   }
   set_peer_addr(peer_addr);  // so that connection_state gets set up
   
   while (1) {
     if (tcp_read((char*)&connect, sizeof(connect)) < 0) {
-      ldout(msgr->cct,10) << "accept couldn't read connect" << dendl;
+      ldout(cct,10) << "accept couldn't read connect" << dendl;
       goto fail_unlocked;
     }
 
@@ -363,14 +365,14 @@ int Pipe::accept()
     if (connect.authorizer_len) {
       bp = buffer::create(connect.authorizer_len);
       if (tcp_read(bp.c_str(), connect.authorizer_len) < 0) {
-        ldout(msgr->cct,10) << "accept couldn't read connect authorizer" << dendl;
+        ldout(cct,10) << "accept couldn't read connect authorizer" << dendl;
         goto fail_unlocked;
       }
       authorizer.push_back(bp);
       authorizer_reply.clear();
     }
 
-    ldout(msgr->cct,20) << "accept got peer connect_seq " << connect.connect_seq
+    ldout(cct,20) << "accept got peer connect_seq " << connect.connect_seq
 	     << " global_seq " << connect.global_seq
 	     << dendl;
     
@@ -385,7 +387,7 @@ int Pipe::accept()
     // note peer's type, flags
     set_peer_type(connect.host_type);
     policy = msgr->get_policy(connect.host_type);
-    ldout(msgr->cct,10) << "accept of host_type " << connect.host_type
+    ldout(cct,10) << "accept of host_type " << connect.host_type
 			<< ", policy.lossy=" << policy.lossy
 			<< " policy.server=" << policy.server
 			<< " policy.standby=" << policy.standby
@@ -397,7 +399,7 @@ int Pipe::accept()
     msgr->lock.Unlock();
 
     // mismatch?
-    ldout(msgr->cct,10) << "accept my proto " << reply.protocol_version
+    ldout(cct,10) << "accept my proto " << reply.protocol_version
 	     << ", their proto " << connect.protocol_version << dendl;
     if (connect.protocol_version != reply.protocol_version) {
       reply.tag = CEPH_MSGR_TAG_BADPROTOVER;
@@ -408,15 +410,15 @@ int Pipe::accept()
     if (connect.authorizer_protocol == CEPH_AUTH_CEPHX) {
       if (peer_type == CEPH_ENTITY_TYPE_OSD ||
 	  peer_type == CEPH_ENTITY_TYPE_MDS) {
-	if (msgr->cct->_conf->cephx_require_signatures ||
-	    msgr->cct->_conf->cephx_cluster_require_signatures) {
-	  ldout(msgr->cct,10) << "using cephx, requiring MSG_AUTH feature bit for cluster" << dendl;
+	if (cct->_conf->cephx_require_signatures ||
+	    cct->_conf->cephx_cluster_require_signatures) {
+	  ldout(cct,10) << "using cephx, requiring MSG_AUTH feature bit for cluster" << dendl;
 	  policy.features_required |= CEPH_FEATURE_MSG_AUTH;
 	}
       } else {
-	if (msgr->cct->_conf->cephx_require_signatures ||
-	    msgr->cct->_conf->cephx_service_require_signatures) {
-	  ldout(msgr->cct,10) << "using cephx, requiring MSG_AUTH feature bit for service" << dendl;
+	if (cct->_conf->cephx_require_signatures ||
+	    cct->_conf->cephx_service_require_signatures) {
+	  ldout(cct,10) << "using cephx, requiring MSG_AUTH feature bit for service" << dendl;
 	  policy.features_required |= CEPH_FEATURE_MSG_AUTH;
 	}
       }
@@ -424,7 +426,7 @@ int Pipe::accept()
 
     feat_missing = policy.features_required & ~(uint64_t)connect.features;
     if (feat_missing) {
-      ldout(msgr->cct,1) << "peer missing required features " << std::hex << feat_missing << std::dec << dendl;
+      ldout(cct,1) << "peer missing required features " << std::hex << feat_missing << std::dec << dendl;
       reply.tag = CEPH_MSGR_TAG_FEATURES;
       goto reply;
     }
@@ -436,7 +438,7 @@ int Pipe::accept()
     if (!msgr->verify_authorizer(connection_state.get(), peer_type, connect.authorizer_protocol, authorizer,
 				 authorizer_reply, authorizer_valid, session_key) ||
 	!authorizer_valid) {
-      ldout(msgr->cct,0) << "accept: got bad authorizer" << dendl;
+      ldout(cct,0) << "accept: got bad authorizer" << dendl;
       pipe_lock.Lock();
       if (state != STATE_ACCEPTING)
 	goto shutting_down_msgr_unlocked;
@@ -447,7 +449,7 @@ int Pipe::accept()
 
     // We've verified the authorizer for this pipe, so set up the session security structure.  PLR
 
-    ldout(msgr->cct,10) << "accept:  setting up session_security." << dendl;
+    ldout(cct,10) << "accept:  setting up session_security." << dendl;
 
   retry_existing_lookup:
     msgr->lock.Lock();
@@ -478,7 +480,7 @@ int Pipe::accept()
       }
 
       if (connect.global_seq < existing->peer_global_seq) {
-	ldout(msgr->cct,10) << "accept existing " << existing << ".gseq " << existing->peer_global_seq
+	ldout(cct,10) << "accept existing " << existing << ".gseq " << existing->peer_global_seq
 		 << " > " << connect.global_seq << ", RETRY_GLOBAL" << dendl;
 	reply.tag = CEPH_MSGR_TAG_RETRY_GLOBAL;
 	reply.global_seq = existing->peer_global_seq;  // so we can send it below..
@@ -486,23 +488,23 @@ int Pipe::accept()
 	msgr->lock.Unlock();
 	goto reply;
       } else {
-	ldout(msgr->cct,10) << "accept existing " << existing << ".gseq " << existing->peer_global_seq
+	ldout(cct,10) << "accept existing " << existing << ".gseq " << existing->peer_global_seq
 		 << " <= " << connect.global_seq << ", looks ok" << dendl;
       }
       
       if (existing->policy.lossy) {
-	ldout(msgr->cct,0) << "accept replacing existing (lossy) channel (new one lossy="
+	ldout(cct,0) << "accept replacing existing (lossy) channel (new one lossy="
 	        << policy.lossy << ")" << dendl;
 	existing->was_session_reset();
 	goto replace;
       }
 
-      ldout(msgr->cct,0) << "accept connect_seq " << connect.connect_seq
+      ldout(cct,0) << "accept connect_seq " << connect.connect_seq
 			 << " vs existing " << existing->connect_seq
 			 << " state " << existing->get_state_name() << dendl;
 
       if (connect.connect_seq == 0 && existing->connect_seq > 0) {
-	ldout(msgr->cct,0) << "accept peer reset, then tried to connect to us, replacing" << dendl;
+	ldout(cct,0) << "accept peer reset, then tried to connect to us, replacing" << dendl;
         // this is a hard reset from peer
         is_reset_from_peer = true;
 	if (policy.resetcheck)
@@ -512,7 +514,7 @@ int Pipe::accept()
 
       if (connect.connect_seq < existing->connect_seq) {
 	// old attempt, or we sent READY but they didn't get it.
-	ldout(msgr->cct,10) << "accept existing " << existing << ".cseq " << existing->connect_seq
+	ldout(cct,10) << "accept existing " << existing << ".cseq " << existing->connect_seq
 			    << " > " << connect.connect_seq << ", RETRY_SESSION" << dendl;
 	goto retry_session;
       }
@@ -524,7 +526,7 @@ int Pipe::accept()
 	// we need to resolve here.
 	if (existing->state == STATE_OPEN ||
 	    existing->state == STATE_STANDBY) {
-	  ldout(msgr->cct,10) << "accept connection race, existing " << existing
+	  ldout(cct,10) << "accept connection race, existing " << existing
 			      << ".cseq " << existing->connect_seq
 			      << " == " << connect.connect_seq
 			      << ", OPEN|STANDBY, RETRY_SESSION" << dendl;
@@ -535,11 +537,11 @@ int Pipe::accept()
 	if (peer_addr < msgr->my_inst.addr ||
 	    existing->policy.server) {
 	  // incoming wins
-	  ldout(msgr->cct,10) << "accept connection race, existing " << existing << ".cseq " << existing->connect_seq
+	  ldout(cct,10) << "accept connection race, existing " << existing << ".cseq " << existing->connect_seq
 		   << " == " << connect.connect_seq << ", or we are server, replacing my attempt" << dendl;
 	  if (!(existing->state == STATE_CONNECTING ||
 		existing->state == STATE_WAIT))
-	    lderr(msgr->cct) << "accept race bad state, would replace, existing="
+	    lderr(cct) << "accept race bad state, would replace, existing="
 			     << existing->get_state_name()
 			     << " " << existing << ".cseq=" << existing->connect_seq
 			     << " == " << connect.connect_seq
@@ -549,11 +551,11 @@ int Pipe::accept()
 	  goto replace;
 	} else {
 	  // our existing outgoing wins
-	  ldout(msgr->cct,10) << "accept connection race, existing " << existing << ".cseq " << existing->connect_seq
+	  ldout(cct,10) << "accept connection race, existing " << existing << ".cseq " << existing->connect_seq
 		   << " == " << connect.connect_seq << ", sending WAIT" << dendl;
 	  assert(peer_addr > msgr->my_inst.addr);
 	  if (!(existing->state == STATE_CONNECTING))
-	    lderr(msgr->cct) << "accept race bad state, would send wait, existing="
+	    lderr(cct) << "accept race bad state, would send wait, existing="
 			     << existing->get_state_name()
 			     << " " << existing << ".cseq=" << existing->connect_seq
 			     << " == " << connect.connect_seq
@@ -572,7 +574,7 @@ int Pipe::accept()
       assert(connect.global_seq >= existing->peer_global_seq);
       if (policy.resetcheck &&   // RESETSESSION only used by servers; peers do not reset each other
 	  existing->connect_seq == 0) {
-	ldout(msgr->cct,0) << "accept we reset (peer sent cseq " << connect.connect_seq 
+	ldout(cct,0) << "accept we reset (peer sent cseq " << connect.connect_seq
 		 << ", " << existing << ".cseq = " << existing->connect_seq
 		 << "), sending RESETSESSION" << dendl;
 	reply.tag = CEPH_MSGR_TAG_RESETSESSION;
@@ -582,19 +584,19 @@ int Pipe::accept()
       }
 
       // reconnect
-      ldout(msgr->cct,10) << "accept peer sent cseq " << connect.connect_seq
+      ldout(cct,10) << "accept peer sent cseq " << connect.connect_seq
 	       << " > " << existing->connect_seq << dendl;
       goto replace;
     } // existing
     else if (connect.connect_seq > 0) {
       // we reset, and they are opening a new session
-      ldout(msgr->cct,0) << "accept we reset (peer sent cseq " << connect.connect_seq << "), sending RESETSESSION" << dendl;
+      ldout(cct,0) << "accept we reset (peer sent cseq " << connect.connect_seq << "), sending RESETSESSION" << dendl;
       msgr->lock.Unlock();
       reply.tag = CEPH_MSGR_TAG_RESETSESSION;
       goto reply;
     } else {
       // new session
-      ldout(msgr->cct,10) << "accept new session" << dendl;
+      ldout(cct,10) << "accept new session" << dendl;
       existing = NULL;
       goto open;
     }
@@ -632,9 +634,9 @@ int Pipe::accept()
     reply_tag = CEPH_MSGR_TAG_SEQ;
     existing_seq = existing->in_seq;
   }
-  ldout(msgr->cct,10) << "accept replacing " << existing << dendl;
+  ldout(cct,10) << "accept replacing " << existing << dendl;
   existing->stop();
-  existing->unregister_pipe();
+  existing->unregister_me();
   replaced = true;
 
   if (existing->policy.lossy) {
@@ -674,7 +676,7 @@ int Pipe::accept()
     // steal outgoing queue and out_seq
     existing->requeue_sent();
     out_seq = existing->out_seq;
-    ldout(msgr->cct,10) << "accept re-queuing on out_seq " << out_seq << " in_seq " << in_seq << dendl;
+    ldout(cct,10) << "accept re-queuing on out_seq " << out_seq << " in_seq " << in_seq << dendl;
     for (map<int, list<Message*> >::iterator p = existing->out_q.begin();
          p != existing->out_q.end();
          ++p)
@@ -690,7 +692,7 @@ int Pipe::accept()
   peer_global_seq = connect.global_seq;
   assert(state == STATE_ACCEPTING);
   state = STATE_OPEN;
-  ldout(msgr->cct,10) << "accept success, connect_seq = " << connect_seq << ", sending READY" << dendl;
+  ldout(cct,10) << "accept success, connect_seq = " << connect_seq << ", sending READY" << dendl;
 
   // send READY reply
   reply.tag = (reply_tag ? reply_tag : CEPH_MSGR_TAG_READY);
@@ -703,10 +705,10 @@ int Pipe::accept()
     reply.flags = reply.flags | CEPH_MSG_CONNECT_LOSSY;
 
   connection_state->set_features((uint64_t)reply.features & (uint64_t)connect.features);
-  ldout(msgr->cct,10) << "accept features " << connection_state->get_features() << dendl;
+  ldout(cct,10) << "accept features " << connection_state->get_features() << dendl;
 
   session_security.reset(
-      get_auth_session_handler(msgr->cct,
+      get_auth_session_handler(cct,
 			       connect.authorizer_protocol,
 			       session_key,
 			       connection_state->get_features()));
@@ -720,7 +722,7 @@ int Pipe::accept()
     goto shutting_down;
   removed = msgr->accepting_pipes.erase(this);
   assert(removed == 1);
-  register_pipe();
+  register_me();
   msgr->lock.Unlock();
   pipe_lock.Unlock();
 
@@ -738,11 +740,11 @@ int Pipe::accept()
 
   if (reply_tag == CEPH_MSGR_TAG_SEQ) {
     if (tcp_write((char*)&existing_seq, sizeof(existing_seq)) < 0) {
-      ldout(msgr->cct,2) << "accept write error on in_seq" << dendl;
+      ldout(cct,2) << "accept write error on in_seq" << dendl;
       goto fail_registered;
     }
     if (tcp_read((char*)&newly_acked_seq, sizeof(newly_acked_seq)) < 0) {
-      ldout(msgr->cct,2) << "accept read error on newly_acked_seq" << dendl;
+      ldout(cct,2) << "accept read error on newly_acked_seq" << dendl;
       goto fail_registered;
     }
   }
@@ -750,22 +752,22 @@ int Pipe::accept()
   pipe_lock.Lock();
   discard_requeued_up_to(newly_acked_seq);
   if (state != STATE_CLOSED) {
-    ldout(msgr->cct,10) << "accept starting writer, state " << get_state_name() << dendl;
+    ldout(cct,10) << "accept starting writer, state " << get_state_name() << dendl;
     start_writer();
   }
-  ldout(msgr->cct,20) << "accept done" << dendl;
+  ldout(cct,20) << "accept done" << dendl;
 
   maybe_start_delay_thread();
 
   return 0;   // success.
 
  fail_registered:
-  ldout(msgr->cct, 10) << "accept fault after register" << dendl;
+  ldout(cct, 10) << "accept fault after register" << dendl;
 
-  if (msgr->cct->_conf->ms_inject_internal_delays) {
-    ldout(msgr->cct, 10) << " sleep for " << msgr->cct->_conf->ms_inject_internal_delays << dendl;
+  if (cct->_conf->ms_inject_internal_delays) {
+    ldout(cct, 10) << " sleep for " << cct->_conf->ms_inject_internal_delays << dendl;
     utime_t t;
-    t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+    t.set_from_double(cct->_conf->ms_inject_internal_delays);
     t.sleep();
   }
 
@@ -773,7 +775,7 @@ int Pipe::accept()
   pipe_lock.Lock();
   if (state != STATE_CLOSED) {
     bool queued = is_queued();
-    ldout(msgr->cct, 10) << "  queued = " << (int)queued << dendl;
+    ldout(cct, 10) << "  queued = " << (int)queued << dendl;
     if (queued) {
       state = policy.server ? STATE_STANDBY : STATE_CONNECTING;
     } else if (replaced) {
@@ -793,10 +795,10 @@ int Pipe::accept()
  shutting_down_msgr_unlocked:
   assert(pipe_lock.is_locked());
 
-  if (msgr->cct->_conf->ms_inject_internal_delays) {
-    ldout(msgr->cct, 10) << " sleep for " << msgr->cct->_conf->ms_inject_internal_delays << dendl;
+  if (cct->_conf->ms_inject_internal_delays) {
+    ldout(cct, 10) << " sleep for " << cct->_conf->ms_inject_internal_delays << dendl;
     utime_t t;
-    t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+    t.set_from_double(cct->_conf->ms_inject_internal_delays);
     t.sleep();
   }
 
@@ -809,20 +811,20 @@ int Pipe::accept()
 void Pipe::set_socket_options()
 {
   // disable Nagle algorithm?
-  if (msgr->cct->_conf->ms_tcp_nodelay) {
+  if (cct->_conf->ms_tcp_nodelay) {
     int flag = 1;
     int r = ::setsockopt(sd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
     if (r < 0) {
       r = -errno;
-      ldout(msgr->cct,0) << "couldn't set TCP_NODELAY: " << cpp_strerror(r) << dendl;
+      ldout(cct,0) << "couldn't set TCP_NODELAY: " << cpp_strerror(r) << dendl;
     }
   }
-  if (msgr->cct->_conf->ms_tcp_rcvbuf) {
-    int size = msgr->cct->_conf->ms_tcp_rcvbuf;
+  if (cct->_conf->ms_tcp_rcvbuf) {
+    int size = cct->_conf->ms_tcp_rcvbuf;
     int r = ::setsockopt(sd, SOL_SOCKET, SO_RCVBUF, (void*)&size, sizeof(size));
     if (r < 0)  {
       r = -errno;
-      ldout(msgr->cct,0) << "couldn't set SO_RCVBUF to " << size << ": " << cpp_strerror(r) << dendl;
+      ldout(cct,0) << "couldn't set SO_RCVBUF to " << size << ": " << cpp_strerror(r) << dendl;
     }
   }
 
@@ -832,7 +834,7 @@ void Pipe::set_socket_options()
   int r = ::setsockopt(sd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
   if (r) {
     r = -errno;
-    ldout(msgr->cct,0) << "couldn't set SO_NOSIGPIPE: " << cpp_strerror(r) << dendl;
+    ldout(cct,0) << "couldn't set SO_NOSIGPIPE: " << cpp_strerror(r) << dendl;
   }
 #endif
 
@@ -843,7 +845,7 @@ void Pipe::set_socket_options()
     int iptos = IPTOS_CLASS_CS6;
     r = ::setsockopt(sd, IPPROTO_IP, IP_TOS, &iptos, sizeof(iptos));
     if (r < 0) {
-      ldout(msgr->cct,0) << "couldn't set IP_TOS to " << iptos
+      ldout(cct,0) << "couldn't set IP_TOS to " << iptos
                          << ": " << cpp_strerror(errno) << dendl;
     }
 #endif
@@ -854,7 +856,7 @@ void Pipe::set_socket_options()
     r = ::setsockopt(sd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
 #endif
     if (r < 0) {
-      ldout(msgr->cct,0) << "couldn't set SO_PRIORITY to " << prio
+      ldout(cct,0) << "couldn't set SO_PRIORITY to " << prio
                          << ": " << cpp_strerror(errno) << dendl;
     }
   }
@@ -864,7 +866,7 @@ int Pipe::connect()
 {
   bool got_bad_auth = false;
 
-  ldout(msgr->cct,10) << "connect " << connect_seq << dendl;
+  ldout(cct,10) << "connect " << connect_seq << dendl;
   assert(pipe_lock.is_locked());
 
   __u32 cseq = connect_seq;
@@ -885,7 +887,7 @@ int Pipe::connect()
   entity_addr_t peer_addr_for_me, socket_addr;
   AuthAuthorizer *authorizer = NULL;
   bufferlist addrbl, myaddrbl;
-  const md_config_t *conf = msgr->cct->_conf;
+  const md_config_t *conf = cct->_conf;
 
   // close old socket.  this is safe because we stopped the reader thread above.
   if (sd >= 0)
@@ -894,7 +896,7 @@ int Pipe::connect()
   // create socket?
   sd = ::socket(peer_addr.get_family(), SOCK_STREAM, 0);
   if (sd < 0) {
-    lderr(msgr->cct) << "connect couldn't created socket " << cpp_strerror(errno) << dendl;
+    lderr(cct) << "connect couldn't created socket " << cpp_strerror(errno) << dendl;
     goto fail;
   }
 
@@ -903,10 +905,10 @@ int Pipe::connect()
   set_socket_options();
 
   // connect!
-  ldout(msgr->cct,10) << "connecting to " << peer_addr << dendl;
+  ldout(cct,10) << "connecting to " << peer_addr << dendl;
   rc = ::connect(sd, (sockaddr*)&peer_addr.addr, peer_addr.addr_size());
   if (rc < 0) {
-    ldout(msgr->cct,2) << "connect error " << peer_addr
+    ldout(cct,2) << "connect error " << peer_addr
 	     << ", " << cpp_strerror(errno) << dendl;
     goto fail;
   }
@@ -914,11 +916,11 @@ int Pipe::connect()
   // verify banner
   // FIXME: this should be non-blocking, or in some other way verify the banner as we get it.
   if (tcp_read((char*)&banner, strlen(CEPH_BANNER)) < 0) {
-    ldout(msgr->cct,2) << "connect couldn't read banner, " << cpp_strerror(errno) << dendl;
+    ldout(cct,2) << "connect couldn't read banner, " << cpp_strerror(errno) << dendl;
     goto fail;
   }
   if (memcmp(banner, CEPH_BANNER, strlen(CEPH_BANNER))) {
-    ldout(msgr->cct,0) << "connect protocol error (bad banner) on peer " << peer_addr << dendl;
+    ldout(cct,0) << "connect protocol error (bad banner) on peer " << peer_addr << dendl;
     goto fail;
   }
 
@@ -929,7 +931,7 @@ int Pipe::connect()
   msg.msg_iovlen = 1;
   msglen = msgvec[0].iov_len;
   if (do_sendmsg(&msg, msglen)) {
-    ldout(msgr->cct,2) << "connect couldn't write my banner, " << cpp_strerror(errno) << dendl;
+    ldout(cct,2) << "connect couldn't write my banner, " << cpp_strerror(errno) << dendl;
     goto fail;
   }
 
@@ -939,7 +941,7 @@ int Pipe::connect()
     addrbl.push_back(p);
   }
   if (tcp_read(addrbl.c_str(), addrbl.length()) < 0) {
-    ldout(msgr->cct,2) << "connect couldn't read peer addrs, " << cpp_strerror(errno) << dendl;
+    ldout(cct,2) << "connect couldn't read peer addrs, " << cpp_strerror(errno) << dendl;
     goto fail;
   }
   {
@@ -949,21 +951,21 @@ int Pipe::connect()
     port = peer_addr_for_me.get_port();
   }
 
-  ldout(msgr->cct,20) << "connect read peer addr " << paddr << " on socket " << sd << dendl;
+  ldout(cct,20) << "connect read peer addr " << paddr << " on socket " << sd << dendl;
   if (peer_addr != paddr) {
     if (paddr.is_blank_ip() &&
 	peer_addr.get_port() == paddr.get_port() &&
 	peer_addr.get_nonce() == paddr.get_nonce()) {
-      ldout(msgr->cct,0) << "connect claims to be " 
+      ldout(cct,0) << "connect claims to be "
 	      << paddr << " not " << peer_addr << " - presumably this is the same node!" << dendl;
     } else {
-      ldout(msgr->cct,0) << "connect claims to be " 
+      ldout(cct,0) << "connect claims to be "
 	      << paddr << " not " << peer_addr << " - wrong node!" << dendl;
       goto fail;
     }
   }
 
-  ldout(msgr->cct,20) << "connect peer addr for me is " << peer_addr_for_me << dendl;
+  ldout(cct,20) << "connect peer addr for me is " << peer_addr_for_me << dendl;
 
   msgr->learned_addr(peer_addr_for_me);
 
@@ -976,10 +978,10 @@ int Pipe::connect()
   msg.msg_iovlen = 1;
   msglen = msgvec[0].iov_len;
   if (do_sendmsg(&msg, msglen)) {
-    ldout(msgr->cct,2) << "connect couldn't write my addr, " << cpp_strerror(errno) << dendl;
+    ldout(cct,2) << "connect couldn't write my addr, " << cpp_strerror(errno) << dendl;
     goto fail;
   }
-  ldout(msgr->cct,10) << "connect sent my addr " << msgr->my_inst.addr << dendl;
+  ldout(cct,10) << "connect sent my addr " << msgr->my_inst.addr << dendl;
 
 
   while (1) {
@@ -996,7 +998,7 @@ int Pipe::connect()
     connect.authorizer_protocol = authorizer ? authorizer->protocol : 0;
     connect.authorizer_len = authorizer ? authorizer->bl.length() : 0;
     if (authorizer) 
-      ldout(msgr->cct,10) << "connect.authorizer_len=" << connect.authorizer_len
+      ldout(cct,10) << "connect.authorizer_len=" << connect.authorizer_len
 	       << " protocol=" << connect.authorizer_protocol << dendl;
     connect.flags = 0;
     if (policy.lossy)
@@ -1014,24 +1016,24 @@ int Pipe::connect()
       msglen += msgvec[1].iov_len;
     }
 
-    ldout(msgr->cct,10) << "connect sending gseq=" << gseq << " cseq=" << cseq
+    ldout(cct,10) << "connect sending gseq=" << gseq << " cseq=" << cseq
 	     << " proto=" << connect.protocol_version << dendl;
     if (do_sendmsg(&msg, msglen)) {
-      ldout(msgr->cct,2) << "connect couldn't write gseq, cseq, " << cpp_strerror(errno) << dendl;
+      ldout(cct,2) << "connect couldn't write gseq, cseq, " << cpp_strerror(errno) << dendl;
       goto fail;
     }
 
-    ldout(msgr->cct,20) << "connect wrote (self +) cseq, waiting for reply" << dendl;
+    ldout(cct,20) << "connect wrote (self +) cseq, waiting for reply" << dendl;
     ceph_msg_connect_reply reply;
     if (tcp_read((char*)&reply, sizeof(reply)) < 0) {
-      ldout(msgr->cct,2) << "connect read reply " << cpp_strerror(errno) << dendl;
+      ldout(cct,2) << "connect read reply " << cpp_strerror(errno) << dendl;
       goto fail;
     }
 
     // sanitize features
     reply.features = ceph_sanitize_features(reply.features);
 
-    ldout(msgr->cct,20) << "connect got reply tag " << (int)reply.tag
+    ldout(cct,20) << "connect got reply tag " << (int)reply.tag
 			<< " connect_seq " << reply.connect_seq
 			<< " global_seq " << reply.global_seq
 			<< " proto " << reply.protocol_version
@@ -1042,10 +1044,10 @@ int Pipe::connect()
     authorizer_reply.clear();
 
     if (reply.authorizer_len) {
-      ldout(msgr->cct,10) << "reply.authorizer_len=" << reply.authorizer_len << dendl;
+      ldout(cct,10) << "reply.authorizer_len=" << reply.authorizer_len << dendl;
       bufferptr bp = buffer::create(reply.authorizer_len);
       if (tcp_read(bp.c_str(), reply.authorizer_len) < 0) {
-        ldout(msgr->cct,10) << "connect couldn't read connect authorizer_reply" << dendl;
+        ldout(cct,10) << "connect couldn't read connect authorizer_reply" << dendl;
 	goto fail;
       }
       authorizer_reply.push_back(bp);
@@ -1054,26 +1056,26 @@ int Pipe::connect()
     if (authorizer) {
       bufferlist::iterator iter = authorizer_reply.begin();
       if (!authorizer->verify_reply(iter)) {
-        ldout(msgr->cct,0) << "failed verifying authorize reply" << dendl;
+        ldout(cct,0) << "failed verifying authorize reply" << dendl;
 	goto fail;
       }
     }
 
     if (conf->ms_inject_internal_delays) {
-      ldout(msgr->cct, 10) << " sleep for " << msgr->cct->_conf->ms_inject_internal_delays << dendl;
+      ldout(cct, 10) << " sleep for " << cct->_conf->ms_inject_internal_delays << dendl;
       utime_t t;
-      t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+      t.set_from_double(cct->_conf->ms_inject_internal_delays);
       t.sleep();
     }
 
     pipe_lock.Lock();
     if (state != STATE_CONNECTING) {
-      ldout(msgr->cct,0) << "connect got RESETSESSION but no longer connecting" << dendl;
+      ldout(cct,0) << "connect got RESETSESSION but no longer connecting" << dendl;
       goto stop_locked;
     }
 
     if (reply.tag == CEPH_MSGR_TAG_FEATURES) {
-      ldout(msgr->cct,0) << "connect protocol feature mismatch, my " << std::hex
+      ldout(cct,0) << "connect protocol feature mismatch, my " << std::hex
 	      << connect.features << " < peer " << reply.features
 	      << " missing " << (reply.features & ~policy.features_supported)
 	      << std::dec << dendl;
@@ -1081,13 +1083,13 @@ int Pipe::connect()
     }
 
     if (reply.tag == CEPH_MSGR_TAG_BADPROTOVER) {
-      ldout(msgr->cct,0) << "connect protocol version mismatch, my " << connect.protocol_version
+      ldout(cct,0) << "connect protocol version mismatch, my " << connect.protocol_version
 	      << " != " << reply.protocol_version << dendl;
       goto fail_locked;
     }
 
     if (reply.tag == CEPH_MSGR_TAG_BADAUTHORIZER) {
-      ldout(msgr->cct,0) << "connect got BADAUTHORIZER" << dendl;
+      ldout(cct,0) << "connect got BADAUTHORIZER" << dendl;
       if (got_bad_auth)
         goto stop_locked;
       got_bad_auth = true;
@@ -1097,7 +1099,7 @@ int Pipe::connect()
       continue;
     }
     if (reply.tag == CEPH_MSGR_TAG_RESETSESSION) {
-      ldout(msgr->cct,0) << "connect got RESETSESSION" << dendl;
+      ldout(cct,0) << "connect got RESETSESSION" << dendl;
       was_session_reset();
       cseq = 0;
       pipe_lock.Unlock();
@@ -1105,14 +1107,14 @@ int Pipe::connect()
     }
     if (reply.tag == CEPH_MSGR_TAG_RETRY_GLOBAL) {
       gseq = msgr->get_global_seq(reply.global_seq);
-      ldout(msgr->cct,10) << "connect got RETRY_GLOBAL " << reply.global_seq
+      ldout(cct,10) << "connect got RETRY_GLOBAL " << reply.global_seq
 	       << " chose new " << gseq << dendl;
       pipe_lock.Unlock();
       continue;
     }
     if (reply.tag == CEPH_MSGR_TAG_RETRY_SESSION) {
       assert(reply.connect_seq > connect_seq);
-      ldout(msgr->cct,10) << "connect got RETRY_SESSION " << connect_seq
+      ldout(cct,10) << "connect got RETRY_SESSION " << connect_seq
 	       << " -> " << reply.connect_seq << dendl;
       cseq = connect_seq = reply.connect_seq;
       pipe_lock.Unlock();
@@ -1120,7 +1122,7 @@ int Pipe::connect()
     }
 
     if (reply.tag == CEPH_MSGR_TAG_WAIT) {
-      ldout(msgr->cct,3) << "connect got WAIT (connection race)" << dendl;
+      ldout(cct,3) << "connect got WAIT (connection race)" << dendl;
       state = STATE_WAIT;
       goto stop_locked;
     }
@@ -1129,30 +1131,30 @@ int Pipe::connect()
         reply.tag == CEPH_MSGR_TAG_SEQ) {
       uint64_t feat_missing = policy.features_required & ~(uint64_t)reply.features;
       if (feat_missing) {
-	ldout(msgr->cct,1) << "missing required features " << std::hex << feat_missing << std::dec << dendl;
+	ldout(cct,1) << "missing required features " << std::hex << feat_missing << std::dec << dendl;
 	goto fail_locked;
       }
 
       if (reply.tag == CEPH_MSGR_TAG_SEQ) {
-        ldout(msgr->cct,10) << "got CEPH_MSGR_TAG_SEQ, reading acked_seq and writing in_seq" << dendl;
+        ldout(cct,10) << "got CEPH_MSGR_TAG_SEQ, reading acked_seq and writing in_seq" << dendl;
         uint64_t newly_acked_seq = 0;
         if (tcp_read((char*)&newly_acked_seq, sizeof(newly_acked_seq)) < 0) {
-          ldout(msgr->cct,2) << "connect read error on newly_acked_seq" << dendl;
+          ldout(cct,2) << "connect read error on newly_acked_seq" << dendl;
           goto fail_locked;
         }
-	ldout(msgr->cct,2) << " got newly_acked_seq " << newly_acked_seq
+	ldout(cct,2) << " got newly_acked_seq " << newly_acked_seq
 			   << " vs out_seq " << out_seq << dendl;
 	while (newly_acked_seq > out_seq) {
 	  Message *m = _get_next_outgoing();
 	  assert(m);
-	  ldout(msgr->cct,2) << " discarding previously sent " << m->get_seq()
+	  ldout(cct,2) << " discarding previously sent " << m->get_seq()
 			     << " " << *m << dendl;
 	  assert(m->get_seq() <= newly_acked_seq);
 	  m->put();
 	  ++out_seq;
 	}
         if (tcp_write((char*)&in_seq, sizeof(in_seq)) < 0) {
-          ldout(msgr->cct,2) << "connect write error on in_seq" << dendl;
+          ldout(cct,2) << "connect write error on in_seq" << dendl;
           goto fail_locked;
         }
       }
@@ -1165,7 +1167,7 @@ int Pipe::connect()
       assert(connect_seq == reply.connect_seq);
       backoff = utime_t();
       connection_state->set_features((uint64_t)reply.features & (uint64_t)connect.features);
-      ldout(msgr->cct,10) << "connect success " << connect_seq << ", lossy = " << policy.lossy
+      ldout(cct,10) << "connect success " << connect_seq << ", lossy = " << policy.lossy
 	       << ", features " << connection_state->get_features() << dendl;
       
 
@@ -1174,7 +1176,7 @@ int Pipe::connect()
 
       if (authorizer != NULL) {
 	session_security.reset(
-            get_auth_session_handler(msgr->cct,
+            get_auth_session_handler(cct,
 				     authorizer->protocol,
 				     authorizer->session_key,
 				     connection_state->get_features()));
@@ -1187,7 +1189,7 @@ int Pipe::connect()
       msgr->ms_deliver_handle_fast_connect(connection_state.get());
       
       if (!reader_running) {
-	ldout(msgr->cct,20) << "connect starting reader" << dendl;
+	ldout(cct,20) << "connect starting reader" << dendl;
 	start_reader();
       }
       maybe_start_delay_thread();
@@ -1196,15 +1198,15 @@ int Pipe::connect()
     }
     
     // protocol error
-    ldout(msgr->cct,0) << "connect got bad tag " << (int)tag << dendl;
+    ldout(cct,0) << "connect got bad tag " << (int)tag << dendl;
     goto fail_locked;
   }
 
  fail:
   if (conf->ms_inject_internal_delays) {
-    ldout(msgr->cct, 10) << " sleep for " << msgr->cct->_conf->ms_inject_internal_delays << dendl;
+    ldout(cct, 10) << " sleep for " << cct->_conf->ms_inject_internal_delays << dendl;
     utime_t t;
-    t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+    t.set_from_double(cct->_conf->ms_inject_internal_delays);
     t.sleep();
   }
 
@@ -1213,7 +1215,7 @@ int Pipe::connect()
   if (state == STATE_CONNECTING)
     fault();
   else
-    ldout(msgr->cct,3) << "connect fault, but state = " << get_state_name()
+    ldout(cct,3) << "connect fault, but state = " << get_state_name()
 		       << " != connecting, stopping" << dendl;
 
  stop_locked:
@@ -1221,37 +1223,23 @@ int Pipe::connect()
   return -1;
 }
 
-void Pipe::register_pipe()
-{
-  ldout(msgr->cct,10) << "register_pipe" << dendl;
-  assert(msgr->lock.is_locked());
-  Pipe *existing = msgr->_lookup_pipe(peer_addr);
-  assert(existing == NULL);
-  msgr->rank_pipe[peer_addr] = this;
+void Pipe::register_me() {
+	msgr->register_pipe(this);
 }
 
-void Pipe::unregister_pipe()
-{
-  assert(msgr->lock.is_locked());
-  ceph::unordered_map<entity_addr_t,Pipe*>::iterator p = msgr->rank_pipe.find(peer_addr);
-  if (p != msgr->rank_pipe.end() && p->second == this) {
-    ldout(msgr->cct,10) << "unregister_pipe" << dendl;
-    msgr->rank_pipe.erase(p);
-  } else {
-    ldout(msgr->cct,10) << "unregister_pipe - not registered" << dendl;
-    msgr->accepting_pipes.erase(this);  // somewhat overkill, but safe.
-  }
+void Pipe::unregister_me() {
+	msgr->unregister_pipe(this);
 }
 
 void Pipe::join()
 {
-  ldout(msgr->cct, 20) << "join" << dendl;
+  ldout(cct, 20) << "join" << dendl;
   if (writer_thread.is_started())
     writer_thread.join();
   if (reader_thread.is_started())
     reader_thread.join();
   if (delay_thread) {
-    ldout(msgr->cct, 20) << "joining delay_thread" << dendl;
+    ldout(cct, 20) << "joining delay_thread" << dendl;
     delay_thread->stop();
     delay_thread->join();
   }
@@ -1266,7 +1254,7 @@ void Pipe::requeue_sent()
   while (!sent.empty()) {
     Message *m = sent.back();
     sent.pop_back();
-    ldout(msgr->cct,10) << "requeue_sent " << *m << " for resend seq " << out_seq
+    ldout(cct,10) << "requeue_sent " << *m << " for resend seq " << out_seq
 			<< " (" << m->get_seq() << ")" << dendl;
     rq.push_front(m);
     out_seq--;
@@ -1275,7 +1263,7 @@ void Pipe::requeue_sent()
 
 void Pipe::discard_requeued_up_to(uint64_t seq)
 {
-  ldout(msgr->cct, 10) << "discard_requeued_up_to " << seq << dendl;
+  ldout(cct, 10) << "discard_requeued_up_to " << seq << dendl;
   if (out_q.count(CEPH_MSG_PRIO_HIGHEST) == 0)
     return;
   list<Message*>& rq = out_q[CEPH_MSG_PRIO_HIGHEST];
@@ -1283,7 +1271,7 @@ void Pipe::discard_requeued_up_to(uint64_t seq)
     Message *m = rq.front();
     if (m->get_seq() == 0 || m->get_seq() > seq)
       break;
-    ldout(msgr->cct,10) << "discard_requeued_up_to " << *m << " for resend seq " << out_seq
+    ldout(cct,10) << "discard_requeued_up_to " << *m << " for resend seq " << out_seq
 			<< " <= " << seq << ", discarding" << dendl;
     m->put();
     rq.pop_front();
@@ -1299,16 +1287,16 @@ void Pipe::discard_requeued_up_to(uint64_t seq)
  */
 void Pipe::discard_out_queue()
 {
-  ldout(msgr->cct,10) << "discard_queue" << dendl;
+  ldout(cct,10) << "discard_queue" << dendl;
 
   for (list<Message*>::iterator p = sent.begin(); p != sent.end(); ++p) {
-    ldout(msgr->cct,20) << "  discard " << *p << dendl;
+    ldout(cct,20) << "  discard " << *p << dendl;
     (*p)->put();
   }
   sent.clear();
   for (map<int,list<Message*> >::iterator p = out_q.begin(); p != out_q.end(); ++p)
     for (list<Message*>::iterator r = p->second.begin(); r != p->second.end(); ++r) {
-      ldout(msgr->cct,20) << "  discard " << *r << dendl;
+      ldout(cct,20) << "  discard " << *r << dendl;
       (*r)->put();
     }
   out_q.clear();
@@ -1316,20 +1304,21 @@ void Pipe::discard_out_queue()
 
 void Pipe::fault(bool onread)
 {
-  const md_config_t *conf = msgr->cct->_conf;
+
+  const md_config_t *conf = cct->_conf;
   assert(pipe_lock.is_locked());
   cond.Signal();
 
   if (onread && state == STATE_CONNECTING) {
-    ldout(msgr->cct,10) << "fault already connecting, reader shutting down" << dendl;
+    ldout(cct,10) << "fault already connecting, reader shutting down" << dendl;
     return;
   }
   
-  ldout(msgr->cct,2) << "fault " << cpp_strerror(errno) << dendl;
+  ldout(cct,2) << "fault " << cpp_strerror(errno) << dendl;
 
   if (state == STATE_CLOSED ||
       state == STATE_CLOSING) {
-    ldout(msgr->cct,10) << "fault already closed|closing" << dendl;
+    ldout(cct,10) << "fault already closed|closing" << dendl;
     if (connection_state->clear_pipe(this))
       msgr->dispatch_queue.queue_reset(connection_state.get());
     return;
@@ -1339,7 +1328,7 @@ void Pipe::fault(bool onread)
 
   // lossy channel?
   if (policy.lossy && state != STATE_CONNECTING) {
-    ldout(msgr->cct,10) << "fault on lossy channel, failing" << dendl;
+    ldout(cct,10) << "fault on lossy channel, failing" << dendl;
 
     // disconnect from Connection, and mark it failed.  future messages
     // will be dropped.
@@ -1352,15 +1341,15 @@ void Pipe::fault(bool onread)
     pipe_lock.Unlock();
 
     if (conf->ms_inject_internal_delays) {
-      ldout(msgr->cct, 10) << " sleep for " << msgr->cct->_conf->ms_inject_internal_delays << dendl;
+      ldout(cct, 10) << " sleep for " << cct->_conf->ms_inject_internal_delays << dendl;
       utime_t t;
-      t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+      t.set_from_double(cct->_conf->ms_inject_internal_delays);
       t.sleep();
     }
 
     msgr->lock.Lock();
     pipe_lock.Lock();
-    unregister_pipe();
+    unregister_me();
     msgr->lock.Unlock();
 
     if (delay_thread)
@@ -1380,31 +1369,31 @@ void Pipe::fault(bool onread)
   requeue_sent();
 
   if (policy.standby && !is_queued()) {
-    ldout(msgr->cct,0) << "fault with nothing to send, going to standby" << dendl;
+    ldout(cct,0) << "fault with nothing to send, going to standby" << dendl;
     state = STATE_STANDBY;
     return;
   }
 
   if (state != STATE_CONNECTING) {
     if (policy.server) {
-      ldout(msgr->cct,0) << "fault, server, going to standby" << dendl;
+      ldout(cct,0) << "fault, server, going to standby" << dendl;
       state = STATE_STANDBY;
     } else {
-      ldout(msgr->cct,0) << "fault, initiating reconnect" << dendl;
+      ldout(cct,0) << "fault, initiating reconnect" << dendl;
       connect_seq++;
       state = STATE_CONNECTING;
     }
     backoff = utime_t();
   } else if (backoff == utime_t()) {
-    ldout(msgr->cct,0) << "fault" << dendl;
+    ldout(cct,0) << "fault" << dendl;
     backoff.set_from_double(conf->ms_initial_backoff);
   } else {
-    ldout(msgr->cct,10) << "fault waiting " << backoff << dendl;
-    cond.WaitInterval(msgr->cct, pipe_lock, backoff);
+    ldout(cct,10) << "fault waiting " << backoff << dendl;
+    cond.WaitInterval(cct, pipe_lock, backoff);
     backoff += backoff;
     if (backoff > conf->ms_max_backoff)
       backoff.set_from_double(conf->ms_max_backoff);
-    ldout(msgr->cct,10) << "fault done waiting or woke up" << dendl;
+    ldout(cct,10) << "fault done waiting or woke up" << dendl;
   }
 }
 
@@ -1415,7 +1404,7 @@ int Pipe::randomize_out_seq()
     // here.  We'll check it on the call.  PLR
     int seq_error = get_random_bytes((char *)&out_seq, sizeof(out_seq));
     out_seq &= SEQ_MASK;
-    lsubdout(msgr->cct, ms, 10) << "randomize_out_seq " << out_seq << dendl;
+    lsubdout(cct, ms, 10) << "randomize_out_seq " << out_seq << dendl;
     return seq_error;
   } else {
     // previously, seq #'s always started at 0.
@@ -1428,7 +1417,7 @@ void Pipe::was_session_reset()
 {
   assert(pipe_lock.is_locked());
 
-  ldout(msgr->cct,10) << "was_session_reset" << dendl;
+  ldout(cct,10) << "was_session_reset" << dendl;
   in_q->discard_queue(conn_id);
   if (delay_thread)
     delay_thread->discard();
@@ -1437,7 +1426,7 @@ void Pipe::was_session_reset()
   msgr->dispatch_queue.queue_remote_reset(connection_state.get());
 
   if (randomize_out_seq()) {
-    lsubdout(msgr->cct,ms,15) << "was_session_reset(): Could not get random bytes to set seq number for session reset; set seq number to " << out_seq << dendl;
+    lsubdout(cct,ms,15) << "was_session_reset(): Could not get random bytes to set seq number for session reset; set seq number to " << out_seq << dendl;
   }
 
   in_seq = 0;
@@ -1446,7 +1435,7 @@ void Pipe::was_session_reset()
 
 void Pipe::stop()
 {
-  ldout(msgr->cct,10) << "stop" << dendl;
+  ldout(cct,10) << "stop" << dendl;
   assert(pipe_lock.is_locked());
   state = STATE_CLOSED;
   state_closed.set(1);
@@ -1459,12 +1448,12 @@ void Pipe::stop_and_wait()
   if (state != STATE_CLOSED)
     stop();
 
-  if (msgr->cct->_conf->ms_inject_internal_delays) {
-    ldout(msgr->cct, 10) << __func__ << " sleep for "
-			 << msgr->cct->_conf->ms_inject_internal_delays
+  if (cct->_conf->ms_inject_internal_delays) {
+    ldout(cct, 10) << __func__ << " sleep for "
+			 << cct->_conf->ms_inject_internal_delays
 			 << dendl;
     utime_t t;
-    t.set_from_double(msgr->cct->_conf->ms_inject_internal_delays);
+    t.set_from_double(cct->_conf->ms_inject_internal_delays);
     t.sleep();
   }
   
@@ -1495,7 +1484,7 @@ void Pipe::reader()
 
     // sleep if (re)connecting
     if (state == STATE_STANDBY) {
-      ldout(msgr->cct,20) << "reader sleeping during reconnect|standby" << dendl;
+      ldout(cct,20) << "reader sleeping during reconnect|standby" << dendl;
       cond.Wait(pipe_lock);
       continue;
     }
@@ -1506,26 +1495,28 @@ void Pipe::reader()
     pipe_lock.Unlock();
 
     char tag = -1;
-    ldout(msgr->cct,20) << "reader reading tag..." << dendl;
+    ldout(cct,20) << "reader reading tag..." << dendl;
     if (tcp_read((char*)&tag, 1) < 0) {
       pipe_lock.Lock();
-      ldout(msgr->cct,2) << "reader couldn't read tag, " << cpp_strerror(errno) << dendl;
+      ldout(cct,2) << "reader couldn't read tag, " << cpp_strerror(errno) << dendl;
       fault(true);
       continue;
     }
 
     if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
+
       ldout(msgr->cct,20) << "reader got KEEPALIVE" << dendl;
+
       pipe_lock.Lock();
       continue;
     }
     if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
-      ldout(msgr->cct,30) << "reader got KEEPALIVE2 tag ..." << dendl;
+      ldout(cct,30) << "reader got KEEPALIVE2 tag ..." << dendl;
       ceph_timespec t;
       int rc = tcp_read((char*)&t, sizeof(t));
       pipe_lock.Lock();
       if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp "
+	ldout(cct,2) << "reader couldn't read KEEPALIVE2 stamp "
 			   << cpp_strerror(errno) << dendl;
 	fault(true);
       } else {
@@ -1543,7 +1534,7 @@ void Pipe::reader()
       int rc = tcp_read((char*)&t, sizeof(t));
       pipe_lock.Lock();
       if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp " << cpp_strerror(errno) << dendl;
+	ldout(cct,2) << "reader couldn't read KEEPALIVE2 stamp " << cpp_strerror(errno) << dendl;
 	fault(true);
       } else {
 	connection_state->last_keepalive_ack = utime_t(t);
@@ -1553,12 +1544,12 @@ void Pipe::reader()
 
     // open ...
     if (tag == CEPH_MSGR_TAG_ACK) {
-      ldout(msgr->cct,20) << "reader got ACK" << dendl;
+      ldout(cct,20) << "reader got ACK" << dendl;
       ceph_le64 seq;
       int rc = tcp_read((char*)&seq, sizeof(seq));
       pipe_lock.Lock();
       if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read ack seq, " << cpp_strerror(errno) << dendl;
+	ldout(cct,2) << "reader couldn't read ack seq, " << cpp_strerror(errno) << dendl;
 	fault(true);
       } else if (state != STATE_CLOSED) {
         handle_ack(seq);
@@ -1567,7 +1558,7 @@ void Pipe::reader()
     }
 
     else if (tag == CEPH_MSGR_TAG_MSG) {
-      ldout(msgr->cct,20) << "reader got MSG" << dendl;
+      ldout(cct,20) << "reader got MSG" << dendl;
       Message *m = 0;
       int r = read_message(&m, auth_handler.get());
 
@@ -1592,20 +1583,20 @@ void Pipe::reader()
       // occasionally pull a message out of the sent queue to send elsewhere.  in that case
       // it doesn't matter if we "got" it or not.
       if (m->get_seq() <= in_seq) {
-	ldout(msgr->cct,0) << "reader got old message "
+	ldout(cct,0) << "reader got old message "
 		<< m->get_seq() << " <= " << in_seq << " " << m << " " << *m
 		<< ", discarding" << dendl;
 	msgr->dispatch_throttle_release(m->get_dispatch_throttle_size());
 	m->put();
 	if (connection_state->has_feature(CEPH_FEATURE_RECONNECT_SEQ) &&
-	    msgr->cct->_conf->ms_die_on_old_message)
+	    cct->_conf->ms_die_on_old_message)
 	  assert(0 == "old msgs despite reconnect_seq feature");
 	continue;
       }
       if (m->get_seq() > in_seq + 1) {
-	ldout(msgr->cct,0) << "reader missed message?  skipped from seq "
+	ldout(cct,0) << "reader missed message?  skipped from seq "
 			   << in_seq << " to " << m->get_seq() << dendl;
-	if (msgr->cct->_conf->ms_die_on_skipped_message)
+	if (cct->_conf->ms_die_on_skipped_message)
 	  assert(0 == "skipped incoming seq");
       }
 
@@ -1616,17 +1607,17 @@ void Pipe::reader()
 
       cond.Signal();  // wake up writer, to ack this
       
-      ldout(msgr->cct,10) << "reader got message "
+      ldout(cct,10) << "reader got message "
 	       << m->get_seq() << " " << m << " " << *m
 	       << dendl;
       in_q->fast_preprocess(m);
 
       if (delay_thread) {
         utime_t release;
-        if (rand() % 10000 < msgr->cct->_conf->ms_inject_delay_probability * 10000.0) {
+        if (rand() % 10000 < cct->_conf->ms_inject_delay_probability * 10000.0) {
           release = m->get_recv_stamp();
-          release += msgr->cct->_conf->ms_inject_delay_max * (double)(rand() % 10000) / 10000.0;
-          lsubdout(msgr->cct, ms, 1) << "queue_received will delay until " << release << " on " << m << " " << *m << dendl;
+          release += cct->_conf->ms_inject_delay_max * (double)(rand() % 10000) / 10000.0;
+          lsubdout(cct, ms, 1) << "queue_received will delay until " << release << " on " << m << " " << *m << dendl;
         }
         delay_thread->queue(release, m);
       } else {
@@ -1648,7 +1639,7 @@ void Pipe::reader()
     }
     
     else if (tag == CEPH_MSGR_TAG_CLOSE) {
-      ldout(msgr->cct,20) << "reader got CLOSE" << dendl;
+      ldout(cct,20) << "reader got CLOSE" << dendl;
       pipe_lock.Lock();
       if (state == STATE_CLOSING) {
 	state = STATE_CLOSED;
@@ -1659,8 +1650,8 @@ void Pipe::reader()
       cond.Signal();
       break;
     }
-    else {
-      ldout(msgr->cct,0) << "reader bad tag " << (int)tag << dendl;
+    else { // Wpada tutaj??. Kto zaenqueueował zły tag w writerze?? pewnie jakiś skurwisjin.
+    	ldout(cct,0) << "reader bad tag " << (int)tag << dendl;
       pipe_lock.Lock();
       fault(true);
     }
@@ -1671,7 +1662,7 @@ void Pipe::reader()
   reader_running = false;
   reader_needs_join = true;
   unlock_maybe_reap();
-  ldout(msgr->cct,10) << "reader done" << dendl;
+  ldout(cct,10) << "reader done" << dendl;
 }
 
 /* write msgs to socket.
@@ -1681,7 +1672,7 @@ void Pipe::writer()
 {
   pipe_lock.Lock();
   while (state != STATE_CLOSED) {// && state != STATE_WAIT) {
-    ldout(msgr->cct,10) << "writer: state = " << get_state_name()
+    ldout(cct,10) << "writer: state = " << get_state_name()
 			<< " policy.server=" << policy.server << dendl;
 
     // standby?
@@ -1697,7 +1688,7 @@ void Pipe::writer()
     
     if (state == STATE_CLOSING) {
       // write close tag
-      ldout(msgr->cct,20) << "writer writing CLOSE tag" << dendl;
+      ldout(cct,20) << "writer writing CLOSE tag" << dendl;
       char tag = CEPH_MSGR_TAG_CLOSE;
       state = STATE_CLOSED;
       state_closed.set(1);
@@ -1720,14 +1711,14 @@ void Pipe::writer()
 	if (connection_state->has_feature(CEPH_FEATURE_MSGR_KEEPALIVE2)) {
 	  pipe_lock.Unlock();
 	  rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2,
-				ceph_clock_now(msgr->cct));
+				ceph_clock_now(cct));
 	} else {
 	  pipe_lock.Unlock();
 	  rc = write_keepalive();
 	}
 	pipe_lock.Lock();
 	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write keepalive[2], "
+	  ldout(cct,2) << "writer couldn't write keepalive[2], "
 			     << cpp_strerror(errno) << dendl;
 	  fault();
  	  continue;
@@ -1740,7 +1731,7 @@ void Pipe::writer()
 	int rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2_ACK, t);
 	pipe_lock.Lock();
 	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write keepalive_ack, " << cpp_strerror(errno) << dendl;
+	  ldout(cct,2) << "writer couldn't write keepalive_ack, " << cpp_strerror(errno) << dendl;
 	  fault();
 	  continue;
 	}
@@ -1754,7 +1745,7 @@ void Pipe::writer()
 	int rc = write_ack(send_seq);
 	pipe_lock.Lock();
 	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write ack, " << cpp_strerror(errno) << dendl;
+	  ldout(cct,2) << "writer couldn't write ack, " << cpp_strerror(errno) << dendl;
 	  fault();
  	  continue;
 	}
@@ -1777,10 +1768,10 @@ void Pipe::writer()
 	uint64_t features = connection_state->get_features();
 
 	if (m->empty_payload())
-	  ldout(msgr->cct,20) << "writer encoding " << m->get_seq() << " features " << features
+	  ldout(cct,20) << "writer encoding " << m->get_seq() << " features " << features
 			      << " " << m << " " << *m << dendl;
 	else
-	  ldout(msgr->cct,20) << "writer half-reencoding " << m->get_seq() << " features " << features
+	  ldout(cct,20) << "writer half-reencoding " << m->get_seq() << " features " << features
 			      << " " << m << " " << *m << dendl;
 
 	// encode and copy out of *m
@@ -1796,13 +1787,13 @@ void Pipe::writer()
 	// actually calculate and check the signature, but they should
 	// handle the calls to sign_message and check_signature.  PLR
 	if (session_security.get() == NULL) {
-	  ldout(msgr->cct, 20) << "writer no session security" << dendl;
+	  ldout(cct, 20) << "writer no session security" << dendl;
 	} else {
 	  if (session_security->sign_message(m)) {
-	    ldout(msgr->cct, 20) << "writer failed to sign seq # " << header.seq
+	    ldout(cct, 20) << "writer failed to sign seq # " << header.seq
 				 << "): sig = " << footer.sig << dendl;
 	  } else {
-	    ldout(msgr->cct, 20) << "writer signed seq # " << header.seq
+	    ldout(cct, 20) << "writer signed seq # " << header.seq
 				 << "): sig = " << footer.sig << dendl;
 	  }
 	}
@@ -1813,12 +1804,12 @@ void Pipe::writer()
 
         pipe_lock.Unlock();
 
-        ldout(msgr->cct,20) << "writer sending " << m->get_seq() << " " << m << dendl;
+        ldout(cct,20) << "writer sending " << m->get_seq() << " " << m << dendl;
 	int rc = write_message(header, footer, blist);
 
 	pipe_lock.Lock();
 	if (rc < 0) {
-          ldout(msgr->cct,1) << "writer error sending " << m << ", "
+          ldout(cct,1) << "writer error sending " << m << ", "
 		  << cpp_strerror(errno) << dendl;
 	  fault();
         }
@@ -1828,16 +1819,16 @@ void Pipe::writer()
     }
     
     // wait
-    ldout(msgr->cct,20) << "writer sleeping" << dendl;
+    ldout(cct,20) << "writer sleeping" << dendl;
     cond.Wait(pipe_lock);
   }
   
-  ldout(msgr->cct,20) << "writer finishing" << dendl;
+  ldout(cct,20) << "writer finishing" << dendl;
 
   // reap?
   writer_running = false;
   unlock_maybe_reap();
-  ldout(msgr->cct,10) << "writer done" << dendl;
+  ldout(cct,10) << "writer done" << dendl;
 }
 
 void Pipe::unlock_maybe_reap()
@@ -1848,7 +1839,9 @@ void Pipe::unlock_maybe_reap()
     if (delay_thread && delay_thread->is_flushing()) {
       delay_thread->wait_for_flush();
     }
+    msgr->lock.Lock();
     msgr->queue_reap(this);
+    msgr->lock.Unlock();
   } else {
     pipe_lock.Unlock();
   }
@@ -1882,7 +1875,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 {
   int ret = -1;
   // envelope
-  //ldout(msgr->cct,10) << "receiver.read_message from sd " << sd  << dendl;
+  //ldout(cct,10) << "receiver.read_message from sd " << sd  << dendl;
   
   ceph_msg_header header; 
   ceph_msg_footer footer;
@@ -1908,7 +1901,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
     }
   }
 
-  ldout(msgr->cct,20) << "reader got envelope type=" << header.type
+  ldout(cct,20) << "reader got envelope type=" << header.type
            << " src " << entity_name_t(header.src)
            << " front=" << header.front_len
 	   << " data=" << header.data_len
@@ -1917,7 +1910,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 
   // verify header crc
   if ((msgr->crcflags & MSG_CRC_HEADER) && header_crc != header.crc) {
-    ldout(msgr->cct,0) << "reader got bad header crc " << header_crc << " != " << header.crc << dendl;
+    ldout(cct,0) << "reader got bad header crc " << header_crc << " != " << header.crc << dendl;
     return -1;
   }
 
@@ -1926,10 +1919,10 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   unsigned data_len, data_off;
   int aborted;
   Message *message;
-  utime_t recv_stamp = ceph_clock_now(msgr->cct);
+  utime_t recv_stamp = ceph_clock_now(cct);
 
   if (policy.throttler_messages) {
-    ldout(msgr->cct,10) << "reader wants " << 1 << " message from policy throttler "
+    ldout(cct,10) << "reader wants " << 1 << " message from policy throttler "
 			<< policy.throttler_messages->get_current() << "/"
 			<< policy.throttler_messages->get_max() << dendl;
     policy.throttler_messages->get();
@@ -1938,7 +1931,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   uint64_t message_size = header.front_len + header.middle_len + header.data_len;
   if (message_size) {
     if (policy.throttler_bytes) {
-      ldout(msgr->cct,10) << "reader wants " << message_size << " bytes from policy throttler "
+      ldout(cct,10) << "reader wants " << message_size << " bytes from policy throttler "
 	       << policy.throttler_bytes->get_current() << "/"
 	       << policy.throttler_bytes->get_max() << dendl;
       policy.throttler_bytes->get(message_size);
@@ -1948,13 +1941,13 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
     // policy throttle, as this one does not deadlock (unless dispatch
     // blocks indefinitely, which it shouldn't).  in contrast, the
     // policy throttle carries for the lifetime of the message.
-    ldout(msgr->cct,10) << "reader wants " << message_size << " from dispatch throttler "
+    ldout(cct,10) << "reader wants " << message_size << " from dispatch throttler "
 	     << msgr->dispatch_throttler.get_current() << "/"
 	     << msgr->dispatch_throttler.get_max() << dendl;
     msgr->dispatch_throttler.get(message_size);
   }
 
-  utime_t throttle_stamp = ceph_clock_now(msgr->cct);
+  utime_t throttle_stamp = ceph_clock_now(cct);
 
   // read front
   front_len = header.front_len;
@@ -1963,7 +1956,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
     if (tcp_read(bp.c_str(), front_len) < 0)
       goto out_dethrottle;
     front.push_back(bp);
-    ldout(msgr->cct,20) << "reader got front " << front.length() << dendl;
+    ldout(cct,20) << "reader got front " << front.length() << dendl;
   }
 
   // read middle
@@ -1973,7 +1966,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
     if (tcp_read(bp.c_str(), middle_len) < 0)
       goto out_dethrottle;
     middle.push_back(bp);
-    ldout(msgr->cct,20) << "reader got middle " << middle.length() << dendl;
+    ldout(cct,20) << "reader got middle " << middle.length() << dendl;
   }
 
 
@@ -1998,7 +1991,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
       map<ceph_tid_t,pair<bufferlist,int> >::iterator p = connection_state->rx_buffers.find(header.tid);
       if (p != connection_state->rx_buffers.end()) {
 	if (rxbuf.length() == 0 || p->second.second != rxbuf_version) {
-	  ldout(msgr->cct,10) << "reader seleting rx buffer v " << p->second.second
+	  ldout(cct,10) << "reader seleting rx buffer v " << p->second.second
 		   << " at offset " << offset
 		   << " len " << p->second.first.length() << dendl;
 	  rxbuf = p->second.first;
@@ -2011,7 +2004,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 	}
       } else {
 	if (!newbuf.length()) {
-	  ldout(msgr->cct,20) << "reader allocating new rx buffer at offset " << offset << dendl;
+	  ldout(cct,20) << "reader allocating new rx buffer at offset " << offset << dendl;
 	  alloc_aligned_buffer(newbuf, data_len, data_off);
 	  blp = newbuf.begin();
 	  blp.advance(offset);
@@ -2022,6 +2015,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
       ldout(msgr->cct,20) << "reader reading nonblocking into " << (void*)bp.c_str() << " len " << bp.length() << dendl;
       int got = tcp_read_nonblocking(bp.c_str(), read);
       ldout(msgr->cct,30) << "reader read " << got << " of " << read << dendl;
+
       connection_state->lock.Unlock();
       if (got < 0)
 	goto out_dethrottle;
@@ -2050,17 +2044,17 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   }
   
   aborted = (footer.flags & CEPH_MSG_FOOTER_COMPLETE) == 0;
-  ldout(msgr->cct,10) << "aborted = " << aborted << dendl;
+  ldout(cct,10) << "aborted = " << aborted << dendl;
   if (aborted) {
-    ldout(msgr->cct,0) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
+    ldout(cct,0) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
 	    << " byte message.. ABORTED" << dendl;
     ret = 0;
     goto out_dethrottle;
   }
 
-  ldout(msgr->cct,20) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
+  ldout(cct,20) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
 	   << " byte message" << dendl;
-  message = decode_message(msgr->cct, msgr->crcflags, header, footer, front, middle, data);
+  message = decode_message(cct, msgr->crcflags, header, footer, front, middle, data);
   if (!message) {
     ret = -EINVAL;
     goto out_dethrottle;
@@ -2071,10 +2065,11 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
   //
 
   if (auth_handler == NULL) {
-    ldout(msgr->cct, 10) << "No session security set" << dendl;
+    ldout(cct, 10) << "No session security set" << dendl;
   } else {
     if (auth_handler->check_message_signature(message)) {
-      ldout(msgr->cct, 0) << "Signature check failed" << dendl;
+      ldout(cct, 0) << "Signature check failed" << dendl;
+      message->put();
       ret = -EINVAL;
       goto out_dethrottle;
     } 
@@ -2089,7 +2084,7 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 
   message->set_recv_stamp(recv_stamp);
   message->set_throttle_stamp(throttle_stamp);
-  message->set_recv_complete_stamp(ceph_clock_now(msgr->cct));
+  message->set_recv_complete_stamp(ceph_clock_now(cct));
 
   *pm = message;
   return 0;
@@ -2097,14 +2092,14 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
  out_dethrottle:
   // release bytes reserved from the throttlers on failure
   if (policy.throttler_messages) {
-    ldout(msgr->cct,10) << "reader releasing " << 1 << " message to policy throttler "
+    ldout(cct,10) << "reader releasing " << 1 << " message to policy throttler "
 			<< policy.throttler_messages->get_current() << "/"
 			<< policy.throttler_messages->get_max() << dendl;
     policy.throttler_messages->put();
   }
   if (message_size) {
     if (policy.throttler_bytes) {
-      ldout(msgr->cct,10) << "reader releasing " << message_size << " bytes to policy throttler "
+      ldout(cct,10) << "reader releasing " << message_size << " bytes to policy throttler "
 			  << policy.throttler_bytes->get_current() << "/"
 			  << policy.throttler_bytes->get_max() << dendl;
       policy.throttler_bytes->put(message_size);
@@ -2117,6 +2112,38 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 
 int Pipe::do_sendmsg(struct msghdr *msg, int len, bool more)
 {
+#if !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE)
+  /*
+    If SIGPIPE was pending already we do nothing.  Otherwise, if it
+    become pending (i.e., we generated it), then we sigwait() it (thus
+    clearing pending status).  Then we unblock SIGPIPE, but only if it
+    were us who blocked it.
+  */
+  if (!sigpipe_pending) {
+    sigset_t pending;
+    sigemptyset(&pending);
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE)) {
+      /*
+        Protect ourselves from a situation when SIGPIPE was sent
+        by the user to the whole process, and was delivered to
+        other thread before we had a chance to wait for it.
+      */
+      static const struct timespec nowait = { 0, 0 };
+      TEMP_FAILURE_RETRY(sigtimedwait(&sigpipe_mask, NULL, &nowait));
+    }
+
+    if (sigpipe_unblock)
+      pthread_sigmask(SIG_UNBLOCK, &sigpipe_mask, NULL);
+  }
+#endif  /* !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE) */
+}
+
+
+int Pipe::do_sendmsg(struct msghdr *msg, unsigned len, bool more)
+{
+
+  suppress_sigpipe();
   while (len > 0) {
     if (0) { // sanity
       int l = 0;
@@ -2124,16 +2151,15 @@ int Pipe::do_sendmsg(struct msghdr *msg, int len, bool more)
 	l += msg->msg_iov[i].iov_len;
       assert(l == len);
     }
-
     int r = ::sendmsg(sd, msg, MSG_NOSIGNAL | (more ? MSG_MORE : 0));
     if (r == 0) 
-      ldout(msgr->cct,10) << "do_sendmsg hmm do_sendmsg got r==0!" << dendl;
+      ldout(cct,10) << "do_sendmsg hmm do_sendmsg got r==0!" << dendl;
     if (r < 0) { 
       ldout(msgr->cct,1) << "do_sendmsg error " << cpp_strerror(errno) << dendl;
       return -1;
     }
     if (state == STATE_CLOSED) {
-      ldout(msgr->cct,10) << "do_sendmsg oh look, state == CLOSED, giving up" << dendl;
+      ldout(cct,10) << "do_sendmsg oh look, state == CLOSED, giving up" << dendl;
       errno = EINTR;
       return -1; // close enough
     }
@@ -2142,17 +2168,17 @@ int Pipe::do_sendmsg(struct msghdr *msg, int len, bool more)
     if (len == 0) break;
     
     // hrmph.  trim r bytes off the front of our message.
-    ldout(msgr->cct,20) << "do_sendmsg short write did " << r << ", still have " << len << dendl;
+    ldout(cct,20) << "do_sendmsg short write did " << r << ", still have " << len << dendl;
     while (r > 0) {
       if (msg->msg_iov[0].iov_len <= (size_t)r) {
 	// lose this whole item
-	//ldout(msgr->cct,30) << "skipping " << msg->msg_iov[0].iov_len << ", " << (msg->msg_iovlen-1) << " v, " << r << " left" << dendl;
+	//ldout(cct,30) << "skipping " << msg->msg_iov[0].iov_len << ", " << (msg->msg_iovlen-1) << " v, " << r << " left" << dendl;
 	r -= msg->msg_iov[0].iov_len;
 	msg->msg_iov++;
 	msg->msg_iovlen--;
       } else {
 	// partial!
-	//ldout(msgr->cct,30) << "adjusting " << msg->msg_iov[0].iov_len << ", " << msg->msg_iovlen << " v, " << r << " left" << dendl;
+	//ldout(cct,30) << "adjusting " << msg->msg_iov[0].iov_len << ", " << msg->msg_iovlen << " v, " << r << " left" << dendl;
 	msg->msg_iov[0].iov_base = (char *)msg->msg_iov[0].iov_base + r;
 	msg->msg_iov[0].iov_len -= r;
 	break;
@@ -2165,7 +2191,7 @@ int Pipe::do_sendmsg(struct msghdr *msg, int len, bool more)
 
 int Pipe::write_ack(uint64_t seq)
 {
-  ldout(msgr->cct,10) << "write_ack " << seq << dendl;
+  ldout(cct,10) << "write_ack " << seq << dendl;
 
   char c = CEPH_MSGR_TAG_ACK;
   ceph_le64 s;
@@ -2188,7 +2214,7 @@ int Pipe::write_ack(uint64_t seq)
 
 int Pipe::write_keepalive()
 {
-  ldout(msgr->cct,10) << "write_keepalive" << dendl;
+  ldout(cct,10) << "write_keepalive" << dendl;
 
   char c = CEPH_MSGR_TAG_KEEPALIVE;
 
@@ -2207,7 +2233,7 @@ int Pipe::write_keepalive()
 
 int Pipe::write_keepalive2(char tag, const utime_t& t)
 {
-  ldout(msgr->cct,10) << "write_keepalive2 " << (int)tag << " " << t << dendl;
+  ldout(cct,10) << "write_keepalive2 " << (int)tag << " " << t << dendl;
   struct ceph_timespec ts;
   t.encode_timeval(&ts);
   struct msghdr msg;
@@ -2279,9 +2305,10 @@ int Pipe::write_message(const ceph_msg_header& header, const ceph_msg_footer& fo
     if (donow == 0) {
       ldout(msgr->cct,0) << "donow = " << donow << " left " << left << " pb->length " << pb->length()
 	      << " b_off " << b_off << dendl;
+
     }
     assert(donow > 0);
-    ldout(msgr->cct,30) << " bl_pos " << bl_pos << " b_off " << b_off
+    ldout(cct,30) << " bl_pos " << bl_pos << " b_off " << b_off
 	     << " leftinchunk " << left
 	     << " buffer len " << pb->length()
 	     << " writing " << donow 
@@ -2360,9 +2387,9 @@ int Pipe::tcp_read(char *buf, int len)
 
   while (len > 0) {
 
-    if (msgr->cct->_conf->ms_inject_socket_failures && sd >= 0) {
-      if (rand() % msgr->cct->_conf->ms_inject_socket_failures == 0) {
-	ldout(msgr->cct, 0) << "injecting socket failure" << dendl;
+    if (cct->_conf->ms_inject_socket_failures && sd >= 0) {
+      if (rand() % cct->_conf->ms_inject_socket_failures == 0) {
+	ldout(cct, 0) << "injecting socket failure" << dendl;
 	::shutdown(sd, SHUT_RDWR);
       }
     }
@@ -2421,7 +2448,7 @@ again:
     if (errno == EAGAIN || errno == EINTR) {
       goto again;
     }
-    ldout(msgr->cct, 10) << __func__ << " socket " << sd << " returned "
+    ldout(cct, 10) << __func__ << " socket " << sd << " returned "
 		     << got << " " << cpp_strerror(errno) << dendl;
     return -1;
   }
@@ -2482,7 +2509,7 @@ int Pipe::tcp_read_nonblocking(char *buf, int len)
 {
   int got = buffered_recv(buf, len, MSG_DONTWAIT );
   if (got < 0) {
-    ldout(msgr->cct, 10) << __func__ << " socket " << sd << " returned "
+    ldout(cct, 10) << __func__ << " socket " << sd << " returned "
 		         << got << " " << cpp_strerror(errno) << dendl;
     return -1;
   }
@@ -2507,9 +2534,9 @@ int Pipe::tcp_write(const char *buf, int len)
   pfd.events |= POLLRDHUP;
 #endif
 
-  if (msgr->cct->_conf->ms_inject_socket_failures && sd >= 0) {
-    if (rand() % msgr->cct->_conf->ms_inject_socket_failures == 0) {
-      ldout(msgr->cct, 0) << "injecting socket failure" << dendl;
+  if (cct->_conf->ms_inject_socket_failures && sd >= 0) {
+    if (rand() % cct->_conf->ms_inject_socket_failures == 0) {
+      ldout(cct, 0) << "injecting socket failure" << dendl;
       ::shutdown(sd, SHUT_RDWR);
     }
   }

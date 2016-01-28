@@ -133,6 +133,7 @@ class DispatchQueue;
     ~Pipe();
 
     SimpleMessenger *msgr;
+    CephContext *cct;
     uint64_t conn_id;
     ostream& _pipe_prefix(std::ostream &out) const;
 
@@ -283,8 +284,9 @@ class DispatchQueue;
       connection_state->set_peer_type(t);
     }
 
-    void register_pipe();
-    void unregister_pipe();
+    void register_me();
+    void unregister_me();
+
     void join();
     /// stop a Pipe by closing its socket and setting it to STATE_CLOSED
     void stop();

@@ -102,6 +102,9 @@ void Mutex::Lock(bool no_lockdep) {
     r = pthread_mutex_lock(&_m);
   }
 
+  if (r != 0 ) {
+	  std::cout<<"Error mutexa r = " << r << " ("<< (void*)this << ") " << std::endl;
+  }
   assert(r == 0);
   if (lockdep && g_lockdep) _locked();
   _post_lock();

@@ -185,18 +185,84 @@ public:
 
 private:
 
-  /**
-   * A thread used to tear down Pipes when they're complete.
-   */
-  class ReaperThread : public Thread {
-    SimpleMessenger *msgr;
+  static class SingleReaper : public Thread {
+  private:
+	  bool reaper_started;
+	  Mutex pipe_queue_lock;
+	  Cond pipe_queue_cond;
+	  list<Pipe*> pipe_reap_queue;
+
   public:
-    ReaperThread(SimpleMessenger *m) : msgr(m) {}
-    void *entry() {
-      msgr->reaper_entry();
-      return 0;
-    }
-  } reaper_thread;
+	  SingleReaper() : reaper_started(0), pipe_queue_lock("SimpleMessenger::SingleReaper::pipe_queue_lock") {};
+
+	  void w() {
+		  pipe_queue_lock.Lock();
+		  pipe_queue_cond.WaitInterval(NULL, pipe_queue_lock, utime_t(2,0));
+	  }
+
+	  void start() {
+		  if (!is_started()) {
+			  create("single_reaper");
+			  reaper_started = true;
+		  }
+	  }
+
+	  void stop() {
+		  reaper_started = false;
+	  }
+
+	  void queue(Pipe *pipe) {
+		  Mutex::Locker l(pipe_queue_lock);
+		  pipe_reap_queue.push_back(pipe);
+		  pipe_queue_cond.Signal();
+		//  std::cout<<"JSM - pushnięta pajpa " << (void*)pipe <<". Size: "<< pipe_reap_queue.size()
+			//	  <<", ws: " <<pipe->writer_running <<", rs: " << pipe->reader_running << std::endl;
+	  }
+
+	  void *entry() {
+		  do {
+			  pipe_queue_lock.Lock();
+			  if (pipe_reap_queue.empty())
+				  pipe_queue_cond.Wait(pipe_queue_lock);
+
+			  list<Pipe*> pipes_to_reap;
+			  pipes_to_reap.swap(pipe_reap_queue);
+	//		  std::cout<<"JSM - wziete do zdjecia Pajp: " << pipes_to_reap.size() << std::endl;
+			  pipe_queue_lock.Unlock();
+
+			  while (!pipes_to_reap.empty()) {
+				  Pipe *pipe_to_reap = pipes_to_reap.front();
+				  pipes_to_reap.pop_front();
+				  reap(pipe_to_reap);
+			  }
+
+		  } while(reaper_started);
+
+		  return 0;
+	  }
+
+	  void reap(Pipe *p) {
+//		  std::cout<<"JSM - Reaping pipe " << p << ", mutex " << (void*)&pipe_queue_lock << ", writer:"
+	//			  << p->writer_running <<", reader:"<<p->reader_running<< std::endl;
+
+		  p->pipe_lock.Lock();
+		  p->discard_out_queue();
+
+		  if (p->connection_state) {
+		    bool cleared = p->connection_state->clear_pipe(p);
+		    assert(!cleared);
+		  }
+
+		  p->pipe_lock.Unlock();
+
+		  p->join();
+
+		  if (p->sd >= 0)
+		    ::close(p->sd);
+		  p->put();
+	  }
+
+  } single_reaper;
 
   /**
    * @} // Inner classes
@@ -252,10 +318,7 @@ private:
   void submit_message(Message *m, PipeConnection *con,
 		      const entity_addr_t& addr, int dest_type,
 		      bool already_locked);
-  /**
-   * Look through the pipes in the pipe_reap_queue and tear them down.
-   */
-  void reaper();
+
   /**
    * @} // Utility functions
    */
@@ -299,8 +362,6 @@ private:
   set<Pipe*> accepting_pipes;
   /// a set of all the Pipes we have which are somehow active
   set<Pipe*>      pipes;
-  /// a list of Pipes we want to tear down
-  list<Pipe*>     pipe_reap_queue;
 
   /// internal cluster protocol version, if any, for talking to entities of the same type.
   int cluster_protocol;
@@ -308,11 +369,10 @@ private:
   /// Throttle preventing us from building up a big backlog waiting for dispatch
   Throttle dispatch_throttler;
 
-  bool reaper_started, reaper_stop;
-  Cond reaper_cond;
-
   /// This Cond is slept on by wait() and signaled by dispatch_entry()
   Cond  wait_cond;
+
+  Cond reaper_cond;
 
   friend class Pipe;
 
@@ -390,13 +450,9 @@ public:
    */
   void dispatch_throttle_release(uint64_t msize);
 
-  /**
-   * This function is used by the reaper thread. As long as nobody
-   * has set reaper_stop, it calls the reaper function, then
-   * waits to be signaled when it needs to reap again (or when it needs
-   * to stop).
-   */
-  void reaper_entry();
+  void register_pipe(Pipe *pipe);
+  void unregister_pipe(Pipe *pipe);
+
   /**
    * Add a pipe to the pipe_reap_queue, to be torn down on
    * the next call to reaper().
