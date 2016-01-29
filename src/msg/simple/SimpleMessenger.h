@@ -198,6 +198,62 @@ private:
     }
   } reaper_thread;
 
+  static class SingleReaper : public Thread {
+  private:
+	  bool reaper_started;
+	  Mutex pipe_queue_lock;
+	  Cond pipe_queue_cond;
+	  list<Pipe*> pipe_reap_queue;
+
+  public:
+	  SingleReaper() : reaper_started(0), pipe_queue_lock("SimpleMessenger::SingleReaper::pipe_queue_lock") {};
+
+	  void start() {
+		  if (!is_started()) {
+			  create("single_reaper");
+			  reaper_started = true;
+		  }
+	  }
+
+	  void stop() {
+		  reaper_started = false;
+	  }
+
+	  void queue(Pipe *pipe) {
+		  Mutex::Locker l(pipe_queue_lock);
+		  pipe_reap_queue.push_back(pipe);
+		  pipe_queue_cond.Signal();
+		  std::cout<<"JSM - pushnięta pajpa " << (void*)pipe <<". Size: "<< pipe_reap_queue.size() << std::endl;
+	  }
+
+	  void *entry() {
+		  do {
+			  pipe_queue_lock.Lock();
+			  if (reaper_started)
+				  pipe_queue_cond.Wait(pipe_queue_lock);
+
+			  list<Pipe*> pipes_to_reap;
+			  pipes_to_reap.swap(pipe_reap_queue);
+			  std::cout<<"JSM - wziete do zdjecia Pajp: " << pipes_to_reap.size() << std::endl;
+			  pipe_queue_lock.Unlock();
+
+			  while (!pipes_to_reap.empty()) {
+				  Pipe *pipe_to_reap = pipes_to_reap.front();
+				  pipes_to_reap.pop_front();
+				  reap(pipe_to_reap);
+			  }
+
+		  } while(reaper_started);
+
+		  return 0;
+	  }
+
+	  void reap(Pipe *pipe) {
+		  std::cout<<"JSM - Reaping pipe " << pipe << std::endl;
+	  }
+
+  } single_reaper;
+
   /**
    * @} // Inner classes
    */

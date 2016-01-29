@@ -33,6 +33,11 @@ static ostream& _prefix(std::ostream *_dout, SimpleMessenger *msgr) {
   return *_dout << "-- " << msgr->get_myaddr() << " ";
 }
 
+/*
+ * Single static instance of global reaper
+ */
+SimpleMessenger::SingleReaper SimpleMessenger::single_reaper;
+
 
 /*******************
  * SimpleMessenger
@@ -294,6 +299,7 @@ void SimpleMessenger::queue_reap(Pipe *pipe)
   ldout(cct,10) << "queue_reap " << pipe << dendl;
   lock.Lock();
   pipe_reap_queue.push_back(pipe);
+  single_reaper.queue(pipe);
   reaper_cond.Signal();
   lock.Unlock();
 }
@@ -357,6 +363,8 @@ int SimpleMessenger::start()
   }
 
   lock.Unlock();
+
+  single_reaper.start();
 
   reaper_started = true;
   reaper_thread.create("ms_reaper");
