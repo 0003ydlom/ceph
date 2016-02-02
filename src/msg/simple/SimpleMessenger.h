@@ -251,6 +251,21 @@ private:
 
 	  void reap(Pipe *pipe) {
 		  std::cout<<"JSM - ["<<getpid()<<"] Reaping pipe " << pipe << std::endl;
+
+		    pipe->pipe_lock.Lock();
+		    pipe->discard_out_queue();
+		    if (pipe->connection_state) {
+		      bool cleared = pipe->connection_state->clear_pipe(pipe);
+		      assert(!cleared);
+		    }
+		    pipe->pipe_lock.Unlock();
+
+
+		    pipe->join();
+		    if (pipe->sd >= 0)
+		      ::close(pipe->sd);
+		    pipe->put();
+
 	  }
 
   } single_reaper;
