@@ -375,7 +375,7 @@ int SimpleMessenger::start()
 Pipe *SimpleMessenger::add_accept_pipe(int sd)
 {
   lock.Lock();
-  Pipe *p = new Pipe(this, Pipe::STATE_ACCEPTING, NULL);
+  Pipe *p = new Pipe(this, cct, Pipe::STATE_ACCEPTING, NULL);
   p->sd = sd;
   p->pipe_lock.Lock();
   p->start_reader();
@@ -400,8 +400,7 @@ Pipe *SimpleMessenger::connect_rank(const entity_addr_t& addr,
   ldout(cct,10) << "connect_rank to " << addr << ", creating pipe and registering" << dendl;
   
   // create pipe
-  Pipe *pipe = new Pipe(this, Pipe::STATE_CONNECTING,
-			static_cast<PipeConnection*>(con));
+  Pipe *pipe = new Pipe(this, cct, Pipe::STATE_CONNECTING, static_cast<PipeConnection*>(con));
   pipe->pipe_lock.Lock();
   pipe->set_peer_type(type);
   pipe->set_peer_addr(addr);

@@ -220,6 +220,7 @@ private:
 	  }
 
 	  void queue(Pipe *pipe) {
+		  assert(is_started());
 		  Mutex::Locker l(pipe_queue_lock);
 		  pipe_reap_queue.push_back(pipe);
 		  pipe_queue_cond.Signal();

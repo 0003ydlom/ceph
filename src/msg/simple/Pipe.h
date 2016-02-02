@@ -126,10 +126,11 @@ class DispatchQueue;
     } *delay_thread;
 
   public:
-    Pipe(SimpleMessenger *r, int st, PipeConnection *con);
+    Pipe(SimpleMessenger *r, CephContext *cct, int st, PipeConnection *con);
     ~Pipe();
 
     SimpleMessenger *msgr;
+    CephContext *cct;
     uint64_t conn_id;
     ostream& _pipe_prefix(std::ostream &out) const;
 

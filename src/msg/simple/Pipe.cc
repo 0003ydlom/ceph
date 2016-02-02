@@ -62,12 +62,13 @@ ostream& operator<<(ostream &out, const Pipe &pipe) {
  * Pipe
  */
 
-Pipe::Pipe(SimpleMessenger *r, int st, PipeConnection *con)
+Pipe::Pipe(SimpleMessenger *r, CephContext *cct, int st, PipeConnection *con)
   : RefCountedObject(r->cct),
     reader_thread(this),
     writer_thread(this),
     delay_thread(NULL),
     msgr(r),
+	cct(cct),
     conn_id(r->dispatch_queue.get_id()),
     recv_ofs(0),
     recv_len(0),
@@ -1243,13 +1244,13 @@ void Pipe::unregister_me() {
 
 void Pipe::join()
 {
-  ldout(msgr->cct, 20) << "join" << dendl;
+  ldout(cct, 20) << "join" << dendl;
   if (writer_thread.is_started())
     writer_thread.join();
   if (reader_thread.is_started())
     reader_thread.join();
   if (delay_thread) {
-    ldout(msgr->cct, 20) << "joining delay_thread" << dendl;
+    ldout(cct, 20) << "joining delay_thread" << dendl;
     delay_thread->stop();
     delay_thread->join();
   }
@@ -1297,16 +1298,16 @@ void Pipe::discard_requeued_up_to(uint64_t seq)
  */
 void Pipe::discard_out_queue()
 {
-  ldout(msgr->cct,10) << "discard_queue" << dendl;
+  ldout(cct,10) << "discard_queue" << dendl;
 
   for (list<Message*>::iterator p = sent.begin(); p != sent.end(); ++p) {
-    ldout(msgr->cct,20) << "  discard " << *p << dendl;
+    ldout(cct,20) << "  discard " << *p << dendl;
     (*p)->put();
   }
   sent.clear();
   for (map<int,list<Message*> >::iterator p = out_q.begin(); p != out_q.end(); ++p)
     for (list<Message*>::iterator r = p->second.begin(); r != p->second.end(); ++r) {
-      ldout(msgr->cct,20) << "  discard " << *r << dendl;
+      ldout(cct,20) << "  discard " << *r << dendl;
       (*r)->put();
     }
   out_q.clear();
