@@ -274,9 +274,6 @@ void SimpleMessenger::reaper()
 
     p->pipe_lock.Unlock();
 
-    assert(pipes.count(p));
-    pipes.erase(p);
-
     // drop msgr lock while joining thread; the delay through could be
     // trying to fast dispatch, preventing it from joining without
     // blocking and deadlocking.
@@ -301,7 +298,11 @@ void SimpleMessenger::queue_reap(Pipe *pipe)
   single_reaper.queue(pipe);
   reaper_cond.Signal();
 
+  // Moved from reaper()
   unregister_pipe(pipe);
+  assert(pipes.count(pipe));
+  pipes.erase(pipe);
+
   lock.Unlock();
 }
 
