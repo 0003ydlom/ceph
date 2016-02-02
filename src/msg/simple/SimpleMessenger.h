@@ -223,7 +223,7 @@ private:
 		  Mutex::Locker l(pipe_queue_lock);
 		  pipe_reap_queue.push_back(pipe);
 		  pipe_queue_cond.Signal();
-		  std::cout<<"JSM - pushnięta pajpa " << (void*)pipe <<". Size: "<< pipe_reap_queue.size() << std::endl;
+		  std::cout<<"JSM ["<<getpid()<<"] - pushnięta pajpa " << (void*)pipe <<". Size: "<< pipe_reap_queue.size() << std::endl;
 	  }
 
 	  void *entry() {
@@ -234,7 +234,7 @@ private:
 
 			  list<Pipe*> pipes_to_reap;
 			  pipes_to_reap.swap(pipe_reap_queue);
-			  std::cout<<"JSM - wziete do zdjecia Pajp: " << pipes_to_reap.size() << std::endl;
+			  std::cout<<"JSM ["<<getpid()<<"] - wziete do zdjecia Pajp: " << pipes_to_reap.size() << std::endl;
 			  pipe_queue_lock.Unlock();
 
 			  while (!pipes_to_reap.empty()) {
@@ -249,7 +249,7 @@ private:
 	  }
 
 	  void reap(Pipe *pipe) {
-		  std::cout<<"JSM - Reaping pipe " << pipe << std::endl;
+		  std::cout<<"JSM - ["<<getpid()<<"] Reaping pipe " << pipe << std::endl;
 	  }
 
   } single_reaper;

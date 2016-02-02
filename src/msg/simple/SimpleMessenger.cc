@@ -258,6 +258,7 @@ void SimpleMessenger::reaper()
   while (!pipe_reap_queue.empty()) {
     Pipe *p = pipe_reap_queue.front();
     pipe_reap_queue.pop_front();
+
     ldout(cct,10) << "reaper reaping pipe " << p << " " <<
       p->get_peer_addr() << dendl;
 
@@ -273,8 +274,6 @@ void SimpleMessenger::reaper()
 
     p->pipe_lock.Unlock();
 
-
-    p->unregister_me();
     assert(pipes.count(p));
     pipes.erase(p);
 
@@ -301,6 +300,8 @@ void SimpleMessenger::queue_reap(Pipe *pipe)
   pipe_reap_queue.push_back(pipe);
   single_reaper.queue(pipe);
   reaper_cond.Signal();
+
+  unregister_pipe(pipe);
   lock.Unlock();
 }
 
