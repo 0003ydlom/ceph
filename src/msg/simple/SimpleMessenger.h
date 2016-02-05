@@ -186,84 +186,116 @@ public:
 private:
 
   /**
-   * A thread used to tear down Pipes when they're complete.
+   * A thread used to tear down Pipes when they're complete. Static for all instances
    */
-  class ReaperThread : public Thread {
-    SimpleMessenger *msgr;
-  public:
-    ReaperThread(SimpleMessenger *m) : msgr(m) {}
-    void *entry() {
-      msgr->reaper_entry();
-      return 0;
-    }
-  } reaper_thread;
-
   static class SingleReaper : public Thread {
   private:
-	  bool reaper_started;
+	  bool reaper_started, reaper_in_progress;
 	  Mutex pipe_queue_lock;
 	  Cond pipe_queue_cond;
 	  list<Pipe*> pipe_reap_queue;
 
   public:
-	  SingleReaper() : reaper_started(0), pipe_queue_lock("SimpleMessenger::SingleReaper::pipe_queue_lock") {};
+	  SingleReaper() : reaper_started(0), reaper_in_progress(0), pipe_queue_lock("SimpleMessenger::SingleReaper::pipe_queue_lock") {};
+	  ~SingleReaper() {
+		  stop();
+	  }
 
 	  void start() {
 		  if (!is_started()) {
+			  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - STARTING SR, Mutex:"<< (void*)&pipe_queue_lock << std::endl;
 			  create("single_reaper");
 			  reaper_started = true;
 		  }
 	  }
 
 	  void stop() {
+		  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - in progres? " << reaper_in_progress <<  ". STOPPING SR" << std::endl;
 		  reaper_started = false;
+
 	  }
 
 	  void queue(Pipe *pipe) {
-		  assert(is_started());
-		  Mutex::Locker l(pipe_queue_lock);
-		  pipe_reap_queue.push_back(pipe);
-		  pipe_queue_cond.Signal();
-		  std::cout<<"JSM ["<<getpid()<<"] - pushnięta pajpa " << (void*)pipe <<". Size: "<< pipe_reap_queue.size() << std::endl;
-	  }
-
-	  void *entry() {
-		  do {
+		  	  	  	  	  	  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - queue() - Lock(). Locks before: - " << pipe_queue_lock.get_n() <<", locked? " << pipe_queue_lock.is_locked() << std::endl;
 			  pipe_queue_lock.Lock();
-			  if (reaper_started)
-				  pipe_queue_cond.Wait(pipe_queue_lock);
+			  	  	  	  	  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - queue() - Lock() - locked. Locks now: - " << pipe_queue_lock.get_n() <<", locked? "<< pipe_queue_lock.is_locked() << std::endl;
 
-			  list<Pipe*> pipes_to_reap;
-			  pipes_to_reap.swap(pipe_reap_queue);
-			  std::cout<<"JSM ["<<getpid()<<"] - wziete do zdjecia Pajp: " << pipes_to_reap.size() << std::endl;
+
+			  pipe_reap_queue.push_back(pipe);
+
+			  	  	  	  	  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - queue(). Pipe queued. Size: - " << pipe_reap_queue.size() << std::endl;
+			  pipe_queue_cond.Signal();
+
+			  	  	  	  	  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - queue() - Unlock(). Pipe enqueued.  Locks before: - " << pipe_queue_lock.get_n() << std::endl;
 			  pipe_queue_lock.Unlock();
+		  }
 
-			  while (!pipes_to_reap.empty()) {
-				  Pipe *pipe_to_reap = pipes_to_reap.front();
-				  pipes_to_reap.pop_front();
-				  reap(pipe_to_reap);
-			  }
+		  void *entry() {
+			  reaper_in_progress = true;
+			  do {
+				  	  	  	  	  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - *entry() - Lock(). Locks before: - " << pipe_queue_lock.get_n() << std::endl;
+				pipe_queue_lock.Lock();
+								  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - *entry() - Lock(). locked. Locks now: " <<pipe_queue_lock.get_n()<<", locked? "<<pipe_queue_lock.is_locked()  << std::endl;
 
-		  } while(reaper_started);
 
-		  return 0;
-	  }
+				if (pipe_reap_queue.empty()) {
+					std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - *entry() - queue empty, waiting + unlocking? "<< pipe_queue_lock.is_locked() << std::endl;
+					pipe_queue_cond.Wait(pipe_queue_lock);
+
+//					if (!reaper_started)
+	//					break;
+
+				//	pipe_queue_cond.WaitInterval(NULL, pipe_queue_lock, utime_t(2,0));
+				  /*  if (pipe_reap_queue.empty()) {
+					    std::cout <<"JSM ["<<getpid()<<"] - *entry() - Unlock(). Queue empty, continuing. Locks before: - " << pipe_queue_lock.get_n() << std::endl;
+					    pipe_queue_lock.Unlock();
+					    if (reaper_started)
+					    	continue;
+					    break;
+				    }*/
+				}
+
+				  list<Pipe*> pipes_to_reap;
+				  pipes_to_reap.swap(pipe_reap_queue);
+				  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - *entry(). Copied. Count copied: - " << pipes_to_reap.size() << std::endl;
+				  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - *entry() - Unlock(). Copied OK, free. Locks before: - " << pipe_queue_lock.get_n() << std::endl;
+				  pipe_queue_lock.Unlock();
+
+
+				  while (!pipes_to_reap.empty()) {
+					  Pipe *pipe_to_reap = pipes_to_reap.front();
+					  pipes_to_reap.pop_front();
+					  reap(pipe_to_reap);
+				  }
+
+			  } while(reaper_started);
+
+			  reaper_in_progress = false;
+
+			  return 0;
+		  }
 
 	  void reap(Pipe *pipe) {
-		  std::cout<<"JSM - ["<<getpid()<<"] Reaping pipe " << pipe << std::endl;
+		  std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe << std::endl;
 
+		  std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_1"<< std::endl;
 		    pipe->pipe_lock.Lock();
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_2"<< std::endl;
 		    pipe->discard_out_queue();
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_3"<< std::endl;
 		    if (pipe->connection_state) {
 		      bool cleared = pipe->connection_state->clear_pipe(pipe);
 		      assert(!cleared);
 		    }
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_4"<< std::endl;
 		    pipe->pipe_lock.Unlock();
 
-
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_5"<< std::endl;
 		    pipe->join();
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_6"<< std::endl;
 		    if (pipe->sd >= 0)
 		      ::close(pipe->sd);
+		    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - Reaping pipe " << pipe <<" STEP_7"<< std::endl;
 		    pipe->put();
 
 	  }
@@ -324,10 +356,7 @@ private:
   void submit_message(Message *m, PipeConnection *con,
 		      const entity_addr_t& addr, int dest_type,
 		      bool already_locked);
-  /**
-   * Look through the pipes in the pipe_reap_queue and tear them down.
-   */
-  void reaper();
+
   /**
    * @} // Utility functions
    */
@@ -371,17 +400,12 @@ private:
   set<Pipe*> accepting_pipes;
   /// a set of all the Pipes we have which are somehow active
   set<Pipe*>      pipes;
-  /// a list of Pipes we want to tear down
-  list<Pipe*>     pipe_reap_queue;
 
   /// internal cluster protocol version, if any, for talking to entities of the same type.
   int cluster_protocol;
 
   /// Throttle preventing us from building up a big backlog waiting for dispatch
   Throttle dispatch_throttler;
-
-  bool reaper_started, reaper_stop;
-  Cond reaper_cond;
 
   /// This Cond is slept on by wait() and signaled by dispatch_entry()
   Cond  wait_cond;
@@ -466,17 +490,7 @@ public:
   void unregister_pipe(Pipe *pipe);
 
   /**
-   * This function is used by the reaper thread. As long as nobody
-   * has set reaper_stop, it calls the reaper function, then
-   * waits to be signaled when it needs to reap again (or when it needs
-   * to stop).
-   */
-  void reaper_entry();
-  /**
-   * Add a pipe to the pipe_reap_queue, to be torn down on
-   * the next call to reaper().
-   * It should really only be the Pipe calling this, in our current
-   * implementation.
+   * Add a pipe to the single_reaper queue, to be torn down.
    *
    * @param pipe A Pipe which has stopped its threads and is
    * ready to be torn down.

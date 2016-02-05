@@ -48,14 +48,12 @@ SimpleMessenger::SimpleMessenger(CephContext *cct, entity_name_t name,
   : SimplePolicyMessenger(cct, name,mname, _nonce),
     accepter(this, _nonce),
     dispatch_queue(cct, this),
-    reaper_thread(this),
     nonce(_nonce),
     lock("SimpleMessenger::lock"), need_addr(true), did_bind(false),
     global_seq(0),
     cluster_protocol(0),
     dispatch_throttler(cct, string("msgr_dispatch_throttler-") + mname,
 		       cct->_conf->ms_dispatch_throttle_bytes),
-    reaper_started(false), reaper_stop(false),
     timeout(0),
     local_connection(new PipeConnection(cct, this))
 {
@@ -64,6 +62,7 @@ SimpleMessenger::SimpleMessenger(CephContext *cct, entity_name_t name,
   ceph_spin_init(&global_seq_lock);
   local_features = features;
   init_local_connection();
+  std::cout <<"JSM ["<<getpid()<<", " << (void*)this <<"] - STARTING SM, Mutex in it:"<< (void*)&lock << std::endl;
 }
 
 /**
@@ -72,9 +71,9 @@ SimpleMessenger::SimpleMessenger(CephContext *cct, entity_name_t name,
  */
 SimpleMessenger::~SimpleMessenger()
 {
+  std::cout<<"JSM-  KILLUJEMY SM" << std::endl;
   assert(!did_bind); // either we didn't bind or we shut down the Accepter
   assert(rank_pipe.empty()); // we don't have any running Pipes.
-  assert(!reaper_started); // the reaper thread is stopped
   ceph_spin_destroy(&global_seq_lock);
 }
 
@@ -233,48 +232,23 @@ void SimpleMessenger::unregister_pipe(Pipe *pipe)
   }
 }
 
-void SimpleMessenger::reaper_entry()
-{
-  ldout(cct,10) << "reaper_entry start" << dendl;
-  lock.Lock();
-  while (!reaper_stop) {
-    reaper();  // may drop and retake the lock
-    if (reaper_stop)
-      break;
-    reaper_cond.Wait(lock);
-  }
-  lock.Unlock();
-  ldout(cct,10) << "reaper_entry done" << dendl;
-}
-
-/*
- * note: assumes lock is held
- */
-void SimpleMessenger::reaper()
-{
-  ldout(cct,10) << "reaper" << dendl;
-  assert(lock.is_locked());
-
-  while (!pipe_reap_queue.empty()) {
-
-  }
-  ldout(cct,10) << "reaper done" << dendl;
-}
-
+// We assume SM lock is held!!
 void SimpleMessenger::queue_reap(Pipe *pipe)
 {
   ldout(cct,10) << "queue_reap " << pipe << dendl;
-  lock.Lock();
-//  pipe_reap_queue.push_back(pipe);
-  single_reaper.queue(pipe);
-  reaper_cond.Signal();
+//  lock.Lock();
+  std::cout<<"JSM - QUEUE REAP" << std::endl;
+
 
   // Moved from reaper()
   unregister_pipe(pipe);
   assert(pipes.count(pipe));
   pipes.erase(pipe);
 
-  lock.Unlock();
+  // We use single instace of reaper for all SMs
+  single_reaper.queue(pipe);
+
+//  lock.Unlock();
 }
 
 bool SimpleMessenger::is_connected(Connection *con)
@@ -336,16 +310,15 @@ int SimpleMessenger::start()
   }
 
   lock.Unlock();
-
   single_reaper.start();
 
-  reaper_started = true;
-  reaper_thread.create("ms_reaper");
   return 0;
 }
 
 Pipe *SimpleMessenger::add_accept_pipe(int sd)
 {
+	  std::cout<<"JSM - AAAP" << std::endl;
+
   lock.Lock();
   Pipe *p = new Pipe(this, cct, Pipe::STATE_ACCEPTING, NULL);
   p->sd = sd;
@@ -559,30 +532,32 @@ void SimpleMessenger::wait()
     ldout(cct,20) << "wait: stopped accepter thread" << dendl;
   }
 
-  if (reaper_started) {
-    ldout(cct,20) << "wait: stopping reaper thread" << dendl;
-    lock.Lock();
-    reaper_cond.Signal();
-    reaper_stop = true;
-    lock.Unlock();
-    reaper_thread.join();
-    reaper_started = false;
-    ldout(cct,20) << "wait: stopped reaper thread" << dendl;
-  }
-
   // close+reap all pipes
   lock.Lock();
-  /*{
+  {
     ldout(cct,10) << "wait: closing pipes" << dendl;
 
     while (!rank_pipe.empty()) {
       Pipe *p = rank_pipe.begin()->second;
-      p->unregister_me();
+      unregister_pipe(p);
       p->pipe_lock.Lock();
       p->stop_and_wait();
       p->pipe_lock.Unlock();
     }
+  }
 
+  while (!pipes.empty()) {
+	  std::cout<<"JSM - ANTYEMPTY PAJPSY W SMie!! Zostao: " << pipes.size() << std::endl;
+	  Pipe *p = *(pipes.begin());
+	  queue_reap(p);
+
+  }
+
+  lock.Unlock();
+
+
+
+    /*
     reaper();
     ldout(cct,10) << "wait: waiting for pipes " << pipes << " to close" << dendl;
     while (!pipes.empty()) {
@@ -590,7 +565,8 @@ void SimpleMessenger::wait()
       reaper();
     }
   }*/
-  lock.Unlock();
+
+//  lock.Unlock();
 
   ldout(cct,10) << "wait: done." << dendl;
   ldout(cct,1) << "shutdown complete." << dendl;
@@ -632,6 +608,7 @@ void SimpleMessenger::mark_down_all()
 
 void SimpleMessenger::mark_down(const entity_addr_t& addr)
 {
+
   lock.Lock();
   Pipe *p = _lookup_pipe(addr);
   if (p) {
@@ -658,6 +635,7 @@ void SimpleMessenger::mark_down(Connection *con)
 {
   if (con == NULL)
     return;
+
   lock.Lock();
   Pipe *p = static_cast<Pipe *>(static_cast<PipeConnection*>(con)->get_pipe());
   if (p) {

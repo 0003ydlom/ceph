@@ -63,6 +63,9 @@ private:
   }
 
 public:
+  int get_n() {
+	  return nlock;
+  }
   Mutex(const std::string &n, bool r = false, bool ld=true, bool bt=false,
 	CephContext *cct = 0);
   ~Mutex();

@@ -372,6 +372,7 @@ uint64_t librados::RadosClient::get_instance_id()
 librados::RadosClient::~RadosClient()
 {
   if (messenger)
+	std::cout<<"JSM - FROMIRR!!!" << std::endl;
     delete messenger;
   if (objecter)
     delete objecter;

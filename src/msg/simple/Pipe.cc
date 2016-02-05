@@ -1245,10 +1245,16 @@ void Pipe::unregister_me() {
 void Pipe::join()
 {
   ldout(cct, 20) << "join" << dendl;
-  if (writer_thread.is_started())
+  if (writer_thread.is_started()) {
+	    std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - PIPE JOIN WRITER STARTED pajp: " << (void*)this << std::endl;
     writer_thread.join();
-  if (reader_thread.is_started())
+  }
+
+  if (reader_thread.is_started()) {
+	  std::cout<<"JSM ["<<getpid()<<", " << (void*)this <<"] - PIPE JOIN READER STARTED pajp: " << (void*)this << std::endl;
     reader_thread.join();
+  }
+
   if (delay_thread) {
     ldout(cct, 20) << "joining delay_thread" << dendl;
     delay_thread->stop();
@@ -1357,8 +1363,8 @@ void Pipe::fault(bool onread)
       t.sleep();
     }
 
-    msgr->lock.Lock();
     pipe_lock.Lock();
+    msgr->lock.Lock();
     unregister_me();
     msgr->lock.Unlock();
 
@@ -1508,6 +1514,7 @@ void Pipe::reader()
     ldout(msgr->cct,20) << "reader reading tag..." << dendl;
     if (tcp_read((char*)&tag, 1) < 0) {
       pipe_lock.Lock();
+      std::cout<<"JEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEB"<<std::endl;
       ldout(msgr->cct,2) << "reader couldn't read tag, " << cpp_strerror(errno) << dendl;
       fault(true);
       continue;
@@ -1849,7 +1856,10 @@ void Pipe::unlock_maybe_reap()
     if (delay_thread && delay_thread->is_flushing()) {
       delay_thread->wait_for_flush();
     }
+    std::cout<<"Czy to tutaj sie wypierdala?" << std::endl;
+    msgr->lock.Lock();
     msgr->queue_reap(this);
+    msgr->lock.Unlock();
   } else {
     pipe_lock.Unlock();
   }

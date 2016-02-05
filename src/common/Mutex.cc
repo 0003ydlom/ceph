@@ -74,6 +74,10 @@ Mutex::Mutex(const std::string &n, bool r, bool ld,
 }
 
 Mutex::~Mutex() {
+	if (nlock != 0) {
+		  std::cout << "JSM - Error Mutex::Destructor nlock= " << nlock <<", Base:"<< (void*)this<<std::endl;
+		while (1) {};
+	}
   assert(nlock == 0);
 
   // helgrind gets confused by condition wakeups leading to mutex destruction
@@ -110,6 +114,10 @@ void Mutex::Lock(bool no_lockdep) {
     r = pthread_mutex_lock(&_m);
   }
 
+ if (r != 0) {
+	  std::cout << "JSM - Error Mutex::Lock (" << r <<"), Base:"<< (void*)this<<std::endl;
+	  while (1) {}
+  }
   assert(r == 0);
   if (lockdep && g_lockdep) _locked();
   _post_lock();
