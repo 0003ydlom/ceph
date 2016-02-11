@@ -137,7 +137,7 @@ void Pipe::start_reader()
   }
   reader_running = true;
 
-  reader_thread.create("ms_pipe_read", cct->_conf->ms_rwthread_stack_bytes);
+  reader_thread.create(cct->_conf->ms_rwthread_stack_bytes);
 }
 
 void Pipe::maybe_start_delay_thread()
@@ -2112,38 +2112,6 @@ int Pipe::read_message(Message **pm, AuthSessionHandler* auth_handler)
 
 int Pipe::do_sendmsg(struct msghdr *msg, int len, bool more)
 {
-#if !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE)
-  /*
-    If SIGPIPE was pending already we do nothing.  Otherwise, if it
-    become pending (i.e., we generated it), then we sigwait() it (thus
-    clearing pending status).  Then we unblock SIGPIPE, but only if it
-    were us who blocked it.
-  */
-  if (!sigpipe_pending) {
-    sigset_t pending;
-    sigemptyset(&pending);
-    sigpending(&pending);
-    if (sigismember(&pending, SIGPIPE)) {
-      /*
-        Protect ourselves from a situation when SIGPIPE was sent
-        by the user to the whole process, and was delivered to
-        other thread before we had a chance to wait for it.
-      */
-      static const struct timespec nowait = { 0, 0 };
-      TEMP_FAILURE_RETRY(sigtimedwait(&sigpipe_mask, NULL, &nowait));
-    }
-
-    if (sigpipe_unblock)
-      pthread_sigmask(SIG_UNBLOCK, &sigpipe_mask, NULL);
-  }
-#endif  /* !defined(MSG_NOSIGNAL) && !defined(SO_NOSIGPIPE) */
-}
-
-
-int Pipe::do_sendmsg(struct msghdr *msg, unsigned len, bool more)
-{
-
-  suppress_sigpipe();
   while (len > 0) {
     if (0) { // sanity
       int l = 0;

@@ -193,7 +193,7 @@ private:
 	  list<Pipe*> pipe_reap_queue;
 
   public:
-	  SingleReaper() : reaper_started(0), pipe_queue_lock("SimpleMessenger::SingleReaper::pipe_queue_lock") {};
+	  SingleReaper(CephContext *cct) : reaper_started(0), pipe_queue_lock("SingleReaper::pipe_queue_lock") {};
 
 	  void w() {
 		  pipe_queue_lock.Lock();
@@ -202,7 +202,7 @@ private:
 
 	  void start() {
 		  if (!is_started()) {
-			  create("single_reaper");
+			  create();
 			  reaper_started = true;
 		  }
 	  }
