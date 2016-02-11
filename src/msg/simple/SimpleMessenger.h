@@ -193,7 +193,7 @@ private:
 	  list<Pipe*> pipe_reap_queue;
 
   public:
-	  SingleReaper(CephContext *cct) : reaper_started(0), pipe_queue_lock("SingleReaper::pipe_queue_lock") {};
+	  SingleReaper() : reaper_started(0), pipe_queue_lock("SingleReaper::pipe_queue_lock") {};
 
 	  void w() {
 		  pipe_queue_lock.Lock();
